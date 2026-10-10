@@ -1,0 +1,520 @@
+<!DOCTYPE html>
+<!--
+  视觉设计参考自 v0 模板 modern-tote-bag-store，MIT 惯例
+  后端是 FastAPI + LangGraph + RAG + SSE 的多 Agent 客服系统
+-->
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>智能客服  多Agent 客服系统</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    background: #fcfdfd; color: #1a1a1a; font-size: 15px; line-height: 1.6;
+    height: 100vh; display: flex; flex-direction: column;
+  }
+  button { font-family: inherit; cursor: pointer; border: none; }
+  input { font-family: inherit; outline: none; }
+  a { color: inherit; text-decoration: none; }
+
+  header {
+    padding: 16px 28px; display: flex; align-items: center; justify-content: space-between;
+    background: #fff; border-bottom: 1px solid #eef0ef; position: sticky; top: 0; z-index: 10;
+  }
+  header .logo { font-size: 18px; font-weight: 700; letter-spacing: -0.3px; }
+  header .logo .dot { color: #338838; }
+  header .right { display: flex; align-items: center; gap: 20px; font-size: 14px; }
+  header .online { color: #338838; font-size: 13px; font-weight: 600; }
+  header a.back { color: #6b7280; transition: color .2s; }
+  header a.back:hover { color: #1a1a1a; }
+
+  /* ---------- 登录 ---------- */
+  #loginBox { margin: auto; width: 340px; text-align: center; padding: 20px; }
+  #loginBox h1 { font-size: 30px; font-weight: 800; margin-bottom: 6px; }
+  #loginBox .sub { color: #6b7280; font-size: 13px; margin-bottom: 26px; }
+  #loginBox input {
+    width: 100%; height: 46px; padding: 0 16px; border: 1px solid #e5e7eb;
+    border-radius: 14px; font-size: 14px; margin-bottom: 12px;
+  }
+  #loginBox input:focus { border-color: #415444; }
+  #loginBox button {
+    width: 100%; height: 46px; border-radius: 14px;
+    background: #415444; color: #fff; font-size: 15px; font-weight: 600;
+  }
+  #loginBox button:hover { background: #354638; }
+  #loginBox .err { color: #dc2626; font-size: 13px; margin-top: 10px; min-height: 18px; }
+  #loginBox a { display: inline-block; margin-top: 16px; color: #6b7280; font-size: 13px; }
+
+  /* ---------- 聊天：会话侧栏 ---------- */
+  #chatBox { display: none; flex: 1; flex-direction: row; max-width: 1100px; margin: 0 auto; width: 100%; min-height: 0; }
+  #sessionSidebar {
+    width: 220px; flex-shrink: 0; background: #fff; border-right: 1px solid #eef0ef;
+    padding: 14px 12px; overflow-y: auto;
+  }
+  #sessionSidebar .side-title { font-size: 13px; color: #6b7280; font-weight: 600; margin-bottom: 10px; }
+  #newChatBtn {
+    width: 100%; height: 38px; border-radius: 999px; background: #415444; color: #fff;
+    font-size: 14px; font-weight: 600; margin-bottom: 12px;
+  }
+  #newChatBtn:hover { background: #354638; }
+  .session-item {
+    padding: 10px 12px; border-radius: 12px; color: #1a1a1a; margin-bottom: 6px;
+    background: #f5f7f2; cursor: pointer; font-size: 13px; line-height: 1.4;
+  }
+  .session-item.active { background: #e0e5ce; }
+  .session-item .human-tag { color: #b45309; font-size: 12px; }
+  .session-item .session-del {
+    float: right; width: 18px; height: 18px; padding: 0; line-height: 16px;
+    border-radius: 6px; background: transparent; color: #9ca3af; font-size: 12px;
+  }
+  .session-item .session-del:hover { color: #b91c1c; background: #eceff0; }
+  #chatMain { flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+  #messages { flex: 1; overflow-y: auto; padding: 28px 24px; display: flex; flex-direction: column; gap: 16px; }
+  .msg { display: flex; }
+  .msg.user { justify-content: flex-end; }
+  .msg.assistant { justify-content: flex-start; }
+  .bubble {
+    max-width: 74%; padding: 12px 18px; font-size: 15px; line-height: 1.65;
+    white-space: pre-wrap; word-break: break-word;
+  }
+  .msg.user .bubble { background: #415444; color: #fff; border-radius: 18px 18px 4px 18px; }
+  .msg.assistant .bubble { background: #e0e5ce; color: #1a1a1a; border-radius: 18px 18px 18px 4px; }
+  /* 系统提示样式：转人工统一话术等非 AI 生成内容，与 AI 回答气泡区分 */
+  .msg.assistant .bubble.notice {
+    background: #f3f5f1; color: #6b7280; font-size: 13px;
+    border: 1px dashed #d1d5db; border-radius: 999px; padding: 6px 16px;
+  }
+  /* 历史超限提示条 */
+  .hint-trunc { text-align: center; color: #9ca3af; font-size: 12px; }
+
+  #inputBar {
+    padding: 16px 24px 20px; display: flex; gap: 10px;
+    border-top: 1px solid #eef0ef; background: #fcfdfd;
+  }
+  #inputBar input {
+    flex: 1; height: 48px; padding: 0 20px; border: 1px solid #e5e7eb;
+    border-radius: 999px; font-size: 15px; background: #fff;
+  }
+  #inputBar input:focus { border-color: #415444; }
+  #inputBar button {
+    height: 48px; padding: 0 28px; border-radius: 999px;
+    background: #415444; color: #fff; font-size: 15px; font-weight: 600;
+  }
+  #inputBar button:disabled { opacity: .4; cursor: not-allowed; }
+  .hint { text-align: center; color: #9ca3af; font-size: 12px; padding-bottom: 14px; }
+  .human-note { text-align: center; color: #b45309; font-size: 12px; padding-bottom: 6px; display: none; }
+  .human-note a { color: #b45309; text-decoration: underline; margin-left: 8px; }
+  /* 工具过程条：显示 Agent 正在调用的工具 */
+  .tool-line {
+    font-size: 12px; color: #6b7280; background: #f3f5f1; border-radius: 999px;
+    padding: 4px 14px; align-self: flex-start; margin-bottom: -8px; transition: all .3s;
+  }
+  .tool-line.done { color: #338838; background: #eaf3ea; }
+</style>
+</head>
+<body>
+
+<header id="chatHeader" style="display:none">
+  <div class="logo"> 智能客服<span class="dot">.</span></div>
+  <div class="right">
+    <span class="online"> 在线</span>
+    <a class="back" id="staffLink" href="/static/staff.html" style="display:none"> 工作台</a>
+    <a class="back" href="/static/index.html"> 返回商店</a>
+  </div>
+</header>
+
+<!-- 登录 -->
+<div id="loginBox">
+  <h1> 智能客服</h1>
+  <div class="sub">多Agent 客服系统（demo：demo_user / demo123）</div>
+  <input id="username" placeholder="用户名" autocomplete="off">
+  <input id="password" type="password" placeholder="密码" onkeydown="if(event.key==='Enter')login()">
+  <button onclick="login()">登 录</button>
+  <div class="err" id="loginErr"></div>
+  <a href="/static/index.html"> 返回商店</a>
+  <a href="/static/index.html#register" style="margin-left:14px"> 没有账号？去注册</a>
+</div>
+
+<!-- 聊天 -->
+<div id="chatBox">
+  <aside id="sessionSidebar">
+    <div class="side-title">会话</div>
+    <button id="newChatBtn" onclick="newChat()">＋ 新建会话</button>
+    <div id="sessionList"></div>
+  </aside>
+  <div id="chatMain">
+    <div id="messages"></div>
+    <div class="human-note" id="humanNote">已转人工，客服将尽快接入 <a href="#" onclick="endHandoff(); return false;">结束人工服务</a></div>
+    <div id="inputBar">
+      <input id="input" placeholder="输入问题，例如：帮我查一下订单 20260816001" onkeydown="if(event.key==='Enter')send()">
+      <button id="sendBtn" onclick="send()">发送</button>
+    </div>
+    <div class="hint">流式回答  可查订单 / 商品 / 退款 / 售后政策</div>
+  </div>
+</div>
+
+<script>
+const API = '';
+let token = localStorage.getItem('token') || '';
+let role = localStorage.getItem('role') || '';
+let sessionId = null;
+let streaming = false;
+let sessionsCache = [];
+// 转人工相关系统提示：以"系统提示"样式渲染，不是 AI 回答气泡
+const HANDOFF_NOTICE = '已转人工，客服将尽快接入。';
+const HANDOFF_END_NOTICE = '人工服务已结束，已切换为智能客服，如需继续咨询请直接留言。';
+const NOTICE_TEXTS = [HANDOFF_NOTICE, HANDOFF_END_NOTICE];
+// 单次渲染上限：防止长会话把 DOM 无限撑大，更早消息仍留在数据库
+const MAX_RENDER_MESSAGES = 200;
+
+const loginBox = document.getElementById('loginBox');
+const chatBox = document.getElementById('chatBox');
+const header = document.getElementById('chatHeader');
+const messagesEl = document.getElementById('messages');
+const inputEl = document.getElementById('input');
+const sendBtn = document.getElementById('sendBtn');
+const sessionListEl = document.getElementById('sessionList');
+const humanNote = document.getElementById('humanNote');
+
+// 轻量 toast：结束人工等操作的即时反馈
+function toast(msg) {
+  let t = document.getElementById('toastEl');
+  if (!t) {
+    t = document.createElement('div');
+    t.id = 'toastEl';
+    t.style.cssText = 'position:fixed;bottom:28px;left:50%;transform:translateX(-50%);' +
+      'background:rgba(65,84,68,.92);color:#fff;padding:10px 22px;border-radius:999px;' +
+      'font-size:13px;z-index:300;opacity:0;transition:opacity .3s;pointer-events:none;';
+    document.body.appendChild(t);
+  }
+  t.textContent = msg;
+  t.style.opacity = '1';
+  clearTimeout(t._timer);
+  t._timer = setTimeout(() => { t.style.opacity = '0'; }, 2200);
+}
+
+if (token) {
+  loginBox.style.display = 'none'; chatBox.style.display = 'flex'; header.style.display = 'flex';
+  updateStaffLink();
+  // 客服/主管/管理员的家在工作台：聊天页只属于普通用户，避免特权用户在聊天页"混看"所有人的会话
+  if (!redirectToStaffIfPrivileged()) loadSessions().then(initFromUrl);
+}
+
+// 客服/主管/管理员显示工作台入口
+function updateStaffLink() {
+  document.getElementById('staffLink').style.display =
+    ['customer_service', 'leader', 'admin'].includes(role) ? '' : 'none';
+}
+
+function redirectToStaffIfPrivileged() {
+  if (!['customer_service', 'leader', 'admin'].includes(role)) return false;
+  location.replace('/static/staff.html');
+  return true;
+}
+
+// 转人工会话轮询：人工回复后用户侧自动拉新消息，8s 一次，流式输出时跳过
+let humanPollTimer = null;
+let lastMsgCount = 0;
+function stopHumanPolling() {
+  if (humanPollTimer) { clearInterval(humanPollTimer); humanPollTimer = null; }
+}
+function startHumanPolling() {
+  stopHumanPolling();
+  if (!sessionId) return;
+  humanPollTimer = setInterval(async () => {
+    if (streaming || !sessionId) return;
+    try {
+      const res = await fetch(API + '/chat/sessions/' + sessionId + '/messages', { headers: { 'Authorization': 'Bearer ' + token } });
+      if (!res.ok) return;
+      const msgs = await res.json();
+      if (msgs.length !== lastMsgCount) {
+        lastMsgCount = msgs.length;
+        renderHistory(msgs);
+        humanNote.style.display = 'none';  // 有人工新回复时撤下提示条
+      }
+    } catch (e) { /* 静默 */ }
+  }, 8000);
+}
+
+// 会话 id 同步到 ?session= URL，刷新后仍停在原会话；非法或已删 id 回退空态
+function syncUrl(id) {
+  const u = new URL(location.href);
+  if (id) { u.searchParams.set('session', id); } else { u.searchParams.delete('session'); }
+  history.replaceState(null, '', u);
+}
+
+function initFromUrl() {
+  const urlSession = new URLSearchParams(location.search).get('session');
+  if (!urlSession) return;
+  const target = sessionsCache.find(s => String(s.id) === urlSession);
+  if (target) { selectSession(target.id, target.needs_human); }
+  else { syncUrl(null); }
+}
+
+async function login() {
+  const fd = new FormData();
+  fd.append('username', document.getElementById('username').value);
+  fd.append('password', document.getElementById('password').value);
+  try {
+    const res = await fetch(API + '/auth/login', { method: 'POST', body: fd });
+    const data = await res.json();
+    if (res.ok && data.access_token) {
+      token = data.access_token;
+      role = data.role || '';
+      localStorage.setItem('token', token);
+      localStorage.setItem('role', role);
+      loginBox.style.display = 'none';
+      chatBox.style.display = 'flex';
+      header.style.display = 'flex';
+      updateStaffLink();
+      // 特权角色直接进工作台
+      if (!redirectToStaffIfPrivileged()) loadSessions();
+    } else {
+      document.getElementById('loginErr').textContent = data.detail || '登录失败';
+    }
+  } catch (e) {
+    document.getElementById('loginErr').textContent = '连接后端失败：' + e.message;
+  }
+}
+
+function appendMsg(role, text) {
+  const wrap = document.createElement('div');
+  wrap.className = 'msg ' + role;
+  const bubble = document.createElement('div');
+  bubble.className = 'bubble';
+  bubble.textContent = text;
+  if (role === 'assistant' && NOTICE_TEXTS.includes(text)) bubble.classList.add('notice');
+  wrap.appendChild(bubble);
+  messagesEl.appendChild(wrap);
+  messagesEl.scrollTop = messagesEl.scrollHeight;
+  return bubble;
+}
+
+// 历史与轮询渲染的统一入口，最多渲染最近 MAX_RENDER_MESSAGES 条
+function renderHistory(msgs) {
+  messagesEl.innerHTML = '';
+  const shown = msgs.length > MAX_RENDER_MESSAGES ? msgs.slice(-MAX_RENDER_MESSAGES) : msgs;
+  if (shown.length < msgs.length) {
+    const tip = document.createElement('div');
+    tip.className = 'hint-trunc';
+    tip.textContent = '仅显示最近 ' + MAX_RENDER_MESSAGES + ' 条消息（更早的消息仍在数据库中）';
+    messagesEl.appendChild(tip);
+  }
+  for (const m of shown) appendMsg(m.role === 'user' ? 'user' : 'assistant', m.content);
+}
+
+// 工具过程条：展示 Agent 正在调用或完成哪个工具
+const TOOL_CN = { query_order: '查询订单', query_product: '搜索商品', check_refund_status: '查询退款进度',
+                  query_coupons: '查询优惠券', compare_orders: '对比订单', request_refund: '提交退款申请',
+                  cancel_order: '取消订单', urge_order: '催单加急', add_session_note: '记录会话备注',
+                  create_ticket: '创建售后工单', issue_delay_coupon: '发放补偿券', change_address: '修改地址',
+                  escalate_to_human: '转接人工' };
+const activeToolLines = {};   // name -> DOM 行
+function showToolEvent(ev) {
+  const cn = TOOL_CN[ev.name] || ev.name;
+  if (ev.phase === 'start') {
+    const line = document.createElement('div');
+    line.className = 'tool-line';
+    line.textContent = '⚙️ ' + cn + '…';
+    messagesEl.appendChild(line);
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+    activeToolLines[ev.name] = line;
+  } else if (activeToolLines[ev.name]) {
+    const line = activeToolLines[ev.name];
+    line.textContent = '✓ ' + cn;
+    line.classList.add('done');
+    delete activeToolLines[ev.name];
+  }
+}
+
+async function loadSessions() {
+  try {
+    const res = await fetch(API + '/chat/sessions', { headers: { 'Authorization': 'Bearer ' + token } });
+    if (!res.ok) return;
+    const sessions = await res.json();
+    sessionsCache = sessions;
+    sessionListEl.innerHTML = '';
+    for (const s of sessions) {
+      const item = document.createElement('div');
+      item.className = 'session-item' + (s.id === sessionId ? ' active' : '');
+      const raw = s.title || s.last_message || '（暂无消息）';
+      item.textContent = '#' + s.id + ' ' + (raw.length > 18 ? raw.slice(0, 18) + '…' : raw);
+      if (s.is_owner) {
+        const del = document.createElement('button');
+        del.className = 'session-del';
+        del.textContent = '×';
+        del.title = '删除会话';
+        del.onclick = (e) => { e.stopPropagation(); deleteSession(s.id); };
+        item.appendChild(del);
+      }
+      if (s.needs_human) {
+        const tag = document.createElement('div');
+        tag.className = 'human-tag';
+        tag.textContent = '已转人工';
+        item.appendChild(tag);
+      }
+      item.onclick = () => selectSession(s.id, s.needs_human);
+      sessionListEl.appendChild(item);
+    }
+  } catch (e) { /* 静默，前端刷新时再试 */ }
+}
+
+async function deleteSession(id) {
+  if (!confirm('确定删除该会话？')) return;
+  try {
+    const res = await fetch(API + '/chat/sessions/' + id, {
+      method: 'DELETE',
+      headers: { 'Authorization': 'Bearer ' + token },
+    });
+    if (!res.ok) return;
+    if (sessionId === id) {
+      sessionId = null;
+      messagesEl.innerHTML = '';
+      humanNote.style.display = 'none';
+      stopHumanPolling();
+      syncUrl(null);
+    }
+    await loadSessions();
+  } catch (e) { /* 静默 */ }
+}
+
+function newChat() {
+  sessionId = null;
+  messagesEl.innerHTML = '';
+  humanNote.style.display = 'none';
+  stopHumanPolling();
+  document.querySelectorAll('.session-item').forEach(el => el.classList.remove('active'));
+  syncUrl(null);
+  inputEl.focus();
+}
+
+// 用户主动结束人工服务：会话交还 AI，后端关闭暂停的图并复位状态
+async function endHandoff() {
+  if (!sessionId || !token) return;
+  try {
+    const res = await fetch(API + '/chat/sessions/' + sessionId + '/end-handoff', {
+      method: 'POST',
+      headers: { 'Authorization': 'Bearer ' + token },
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) { toast('结束人工服务失败：' + (data.detail || res.status)); return; }
+    toast('已结束人工服务，AI 继续为您服务');
+    humanNote.style.display = 'none';
+    stopHumanPolling();
+    await loadSessions();
+    // 立即拉一次最新消息，让"人工服务已结束"系统提示当场出现
+    const mr = await fetch(API + '/chat/sessions/' + sessionId + '/messages', { headers: { 'Authorization': 'Bearer ' + token } });
+    if (mr.ok) {
+      const msgs = await mr.json();
+      lastMsgCount = msgs.length;
+      renderHistory(msgs);
+    }
+  } catch (e) { toast('结束人工服务失败：' + e.message); }
+}
+
+async function selectSession(id, needsHuman) {
+  sessionId = id;
+  syncUrl(id);
+  messagesEl.innerHTML = '';
+  stopHumanPolling();
+  document.querySelectorAll('.session-item').forEach(el => el.classList.remove('active'));
+  const actives = sessionListEl.querySelectorAll('.session-item');
+  actives.forEach(el => {
+    const txt = el.textContent || '';
+    if (txt.startsWith('#' + id + ' ')) el.classList.add('active');
+  });
+  humanNote.style.display = needsHuman ? 'block' : 'none';
+  try {
+    const res = await fetch(API + '/chat/sessions/' + id + '/messages', { headers: { 'Authorization': 'Bearer ' + token } });
+    if (!res.ok) { syncUrl(null); return; }
+    const msgs = await res.json();
+    lastMsgCount = msgs.length;
+    renderHistory(msgs);
+  } catch (e) { /* 静默 */ }
+  // 待人工会话：轮询工作台的人工回复
+  if (needsHuman) startHumanPolling();
+}
+
+async function send() {
+  const text = inputEl.value.trim();
+  if (!text || streaming) return;
+  inputEl.value = '';
+  appendMsg('user', text);
+  const bubble = appendMsg('assistant', '');
+  let waitingHandoff = false;   // 等待人工期间的静默记录，不产生回复气泡
+  streaming = true;
+  sendBtn.disabled = true;
+
+  try {
+    const res = await fetch(API + '/chat/stream', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + token },
+      body: JSON.stringify({ message: text, session_id: sessionId }),
+    });
+    if (res.status === 401) {
+      bubble.textContent = ' 登录已过期，请重新登录';
+      localStorage.removeItem('token');
+      location.reload();
+      return;
+    }
+    if (!res.ok) { bubble.textContent = ' 接口错误：' + res.status; return; }
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+    let done = false;
+    while (!done) {
+      const { done: streamDone, value } = await reader.read();
+      if (streamDone) break;
+      buf += decoder.decode(value, { stream: true });
+      let idx;
+      while ((idx = buf.indexOf('\n\n')) !== -1) {
+        const evt = buf.slice(0, idx);
+        buf = buf.slice(idx + 2);
+        for (const line of evt.split('\n')) {
+          if (!line.startsWith('data: ')) continue;
+          const data = line.slice(6).trim();
+          if (data === '[DONE]') { done = true; break; }
+          try {
+            const p = JSON.parse(data);
+            if (p.session_id) { sessionId = p.session_id; syncUrl(sessionId); }
+            else if (p.tool) { showToolEvent(p.tool); }
+            else if (p.waiting_handoff) { waitingHandoff = true; }
+            else if (p.chunk) { bubble.textContent += p.chunk; messagesEl.scrollTop = messagesEl.scrollHeight; }
+            else if (p.error) { bubble.textContent = ' ' + p.error; done = true; }
+          } catch (e) { /* 忽略无法解析的行 */ }
+        }
+        if (done) break;
+      }
+    }
+    if (waitingHandoff && bubble.textContent === '') {
+      // 等待人工期间的静默记录：消息已落库、人工可见，但不产生回复气泡
+      // 转人工提示只在"转人工那一轮"出现一次。
+      bubble.parentElement.remove();
+    } else if (bubble.textContent === '') {
+      bubble.textContent = '（没有收到回复）';
+    } else if (NOTICE_TEXTS.includes(bubble.textContent.trim())) {
+      bubble.classList.add('notice');
+    }
+    await loadSessions();
+    // 本轮若转人工：显示提示条并开始轮询人工回复；若已被处理则撤下
+    const cur = sessionsCache.find(s => s.id === sessionId);
+    if (cur && cur.needs_human) {
+      humanNote.style.display = 'block';
+      startHumanPolling();
+    } else {
+      humanNote.style.display = 'none';
+      stopHumanPolling();
+    }
+  } catch (e) {
+    bubble.textContent = ' 连接出错：' + e.message;
+  }
+  streaming = false;
+  sendBtn.disabled = false;
+  messagesEl.scrollTop = messagesEl.scrollHeight;
+}
+</script>
+</body>
+</html>

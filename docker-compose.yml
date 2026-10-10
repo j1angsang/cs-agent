@@ -1,0 +1,39 @@
+services:
+  db:
+    image: ${PGVECTOR_IMAGE:-pgvector/pgvector:pg18}
+    environment:
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+      POSTGRES_DB: ${DB_NAME:-customer_service_db}
+    ports:
+      # 本机已有 pg-local 占 5432 时，项目 compose 用 5433 暴露给宿主机；
+      # app 容器内部仍通过 service name + 5432 连接。
+      - "5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d ${DB_NAME:-customer_service_db}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    volumes:
+      # PostgreSQL 18 官方镜像数据目录是 /var/lib/postgresql，不是 .../data。
+      - pg_data:/var/lib/postgresql
+
+  app:
+    build:
+      context: .
+      args:
+        PYTHON_IMAGE: ${PYTHON_IMAGE:-python:3.13-slim}
+        UV_IMAGE: ${UV_IMAGE:-ghcr.io/astral-sh/uv:0.11.26}
+    env_file:
+      - .env
+    environment:
+      DB_HOST: db
+      DB_PORT: "5432"
+      DB_NAME: ${DB_NAME:-customer_service_db}
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+
+volumes:
+  pg_data:

@@ -1,0 +1,765 @@
+<!DOCTYPE html>
+<!--
+  客服工作台：转人工会话队列 + 人工回复 + 待审动作审批 + 退款审核。
+  权限：customer_service / leader / admin 可进入，进页面即向后端 /auth/me 实时校验，
+  不信任本地缓存的 role；退款审批仅 leader / admin。
+  后端是 FastAPI + LangGraph + RAG + SSE 的多 Agent 客服系统
+-->
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>客服工作台 · 多Agent 客服系统</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    background: #fcfdfd; color: #1a1a1a; font-size: 15px; line-height: 1.6;
+    height: 100vh; display: flex; flex-direction: column;
+  }
+  button { font-family: inherit; cursor: pointer; border: none; background: none; }
+  input { font-family: inherit; outline: none; }
+  a { color: inherit; text-decoration: none; }
+
+  header {
+    padding: 16px 28px; display: flex; align-items: center; justify-content: space-between;
+    background: #fff; border-bottom: 1px solid #eef0ef; position: sticky; top: 0; z-index: 10;
+  }
+  header .logo { font-size: 18px; font-weight: 700; letter-spacing: -0.3px; }
+  header .logo .dot { color: #338838; }
+  header .right { display: flex; align-items: center; gap: 16px; font-size: 14px; }
+  header .role-tag { padding: 3px 12px; border-radius: 999px; background: #e0e5ce; color: #415444; font-size: 13px; font-weight: 600; }
+  header .whoami { color: #6b7280; font-size: 13px; }
+  header a.back { color: #6b7280; transition: color .2s; }
+  header a.back:hover { color: #1a1a1a; }
+  header .logout { color: #dc2626; font-size: 13px; }
+  header .logout:hover { color: #b91c1c; }
+
+  /* ---------- 登录 ---------- */
+  #loginBox { margin: auto; width: 340px; text-align: center; padding: 20px; }
+  #loginBox h1 { font-size: 30px; font-weight: 800; margin-bottom: 6px; }
+  #loginBox .sub { color: #6b7280; font-size: 13px; margin-bottom: 26px; }
+  #loginBox input {
+    width: 100%; height: 46px; padding: 0 16px; border: 1px solid #e5e7eb;
+    border-radius: 14px; font-size: 14px; margin-bottom: 12px;
+  }
+  #loginBox input:focus { border-color: #415444; }
+  #loginBox button {
+    width: 100%; height: 46px; border-radius: 14px;
+    background: #415444; color: #fff; font-size: 15px; font-weight: 600;
+  }
+  #loginBox button:hover { background: #354638; }
+  #loginBox .err { color: #dc2626; font-size: 13px; margin-top: 10px; min-height: 18px; }
+  #loginBox a { display: inline-block; margin-top: 16px; color: #6b7280; font-size: 13px; }
+
+  /* ---------- 工作台布局 ---------- */
+  #workBox { display: none; flex: 1; flex-direction: row; max-width: 1200px; margin: 0 auto; width: 100%; min-height: 0; }
+  #queuePanel {
+    width: 320px; flex-shrink: 0; background: #fff; border-right: 1px solid #eef0ef;
+    padding: 14px 12px; overflow-y: auto;
+  }
+  .tabs { display: flex; gap: 6px; margin-bottom: 12px; }
+  .tabs button {
+    flex: 1; height: 34px; border-radius: 999px; font-size: 13px; font-weight: 600;
+    background: #f3f5f1; color: #6b7280; transition: all .2s;
+  }
+  .tabs button.active { background: #415444; color: #fff; }
+  .queue-item {
+    padding: 10px 12px; border-radius: 12px; margin-bottom: 6px;
+    background: #f5f7f2; cursor: pointer; font-size: 13px; line-height: 1.5;
+  }
+  .queue-item:hover { background: #eceff0; }
+  .queue-item.active { background: #e0e5ce; }
+  .queue-item .q-title { font-weight: 600; }
+  .queue-item .q-sub { color: #9ca3af; font-size: 12px; }
+  .queue-item .q-flag { display: inline-block; margin-left: 6px; padding: 1px 8px; border-radius: 999px;
+    background: #fef3c7; color: #b45309; font-size: 11px; font-weight: 600; }
+  .queue-item .q-flag-busy { background: #e0e5ce; color: #415444; }
+  .queue-item .q-flag-done { background: #eceff0; color: #9ca3af; }
+
+  #mainPanel { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+  /* 统计卡片：今日自动退款/人工审核/待审退款/待人工/新会话 */
+  .stats-strip { display: flex; gap: 12px; padding: 14px 24px 0; flex-wrap: wrap; }
+  .stat-card { flex: 1; min-width: 120px; background: #fff; border: 1px solid #eef0ef; border-radius: 12px; padding: 10px 16px; }
+  .stat-num { font-size: 22px; font-weight: 800; color: #415444; }
+  .stat-num.warn { color: #b45309; }
+  .stat-label { font-size: 12px; color: #9ca3af; }
+  #emptyState { margin: auto; color: #9ca3af; }
+  #convPanel { display: none; flex: 1; flex-direction: column; min-height: 0; }
+  #convHead {
+    padding: 12px 24px; border-bottom: 1px solid #eef0ef; background: #fff;
+    display: flex; align-items: center; justify-content: space-between; font-size: 14px;
+  }
+  .badge { font-size: 12px; padding: 3px 12px; border-radius: 999px; border: 1px solid #e5e7eb; color: #6b7280; }
+  .badge.human { border-color: #f59e0b; color: #b45309; background: #fffbeb; }
+  .badge.busy { border-color: #bfdbfe; color: #1d4ed8; background: #eff6ff; }
+  .badge.ok { border-color: #338838; color: #15803d; }
+  .btn-end { height: 30px; padding: 0 14px; border-radius: 999px; font-size: 12px; font-weight: 600;
+    border: 1px solid #415444; color: #415444; background: #fff; transition: all .2s; }
+  .btn-end:hover { background: #f3f5f1; }
+  .btn-end:disabled { opacity: .4; cursor: not-allowed; }
+
+  #msgList { flex: 1; overflow-y: auto; padding: 24px; display: flex; flex-direction: column; gap: 14px; }
+  .msg { display: flex; }
+  .msg.user { justify-content: flex-end; }
+  .msg.assistant { justify-content: flex-start; }
+  .bubble { max-width: 74%; padding: 12px 18px; font-size: 15px; line-height: 1.65;
+    white-space: pre-wrap; word-break: break-word; }
+  .msg.user .bubble { background: #415444; color: #fff; border-radius: 18px 18px 4px 18px; }
+  .msg.assistant .bubble { background: #e0e5ce; color: #1a1a1a; border-radius: 18px 18px 18px 4px; }
+
+  /* ---------- 审批卡片 ---------- */
+  #approvalCard {
+    margin: 0 24px; border: 1px solid #f59e0b; background: #fffbeb;
+    border-radius: 16px; padding: 14px 18px; display: none;
+  }
+  #approvalCard .card-title { font-weight: 700; color: #b45309; font-size: 14px; margin-bottom: 6px; }
+  #approvalBody { font-size: 13px; color: #1a1a1a; }
+  #approvalBody .kv { margin-right: 16px; }
+  #approvalBody .kv b { color: #6b7280; font-weight: 600; }
+  #approvalBody .rules { margin-top: 6px; color: #6b7280; }
+  #approvalBody .suggested { margin-top: 6px; color: #92400e; }
+  .approval-actions { display: flex; gap: 10px; margin-top: 12px; align-items: center; }
+  .approval-actions input {
+    flex: 1; height: 38px; padding: 0 14px; border: 1px solid #e5e7eb;
+    border-radius: 999px; font-size: 13px;
+  }
+  .btn { height: 38px; padding: 0 22px; border-radius: 999px; font-size: 13px; font-weight: 600; transition: all .2s; }
+  .btn-green { background: #415444; color: #fff; }
+  .btn-green:hover { background: #354638; }
+  .btn-outline { border: 1px solid #dc2626; color: #dc2626; background: #fff; }
+  .btn-outline:hover { background: #fef2f2; }
+  .btn:disabled { opacity: .4; cursor: not-allowed; }
+  #approvalTip { margin-top: 8px; font-size: 12px; color: #b45309; display: none; }
+
+  /* ---------- 回复栏 ---------- */
+  #replyBar { padding: 16px 24px 8px; display: flex; gap: 10px; }
+  #replyBar input {
+    flex: 1; height: 48px; padding: 0 20px; border: 1px solid #e5e7eb;
+    border-radius: 999px; font-size: 15px; background: #fff;
+  }
+  #replyBar input:focus { border-color: #415444; }
+  #replyBar button {
+    height: 48px; padding: 0 28px; border-radius: 999px;
+    background: #415444; color: #fff; font-size: 15px; font-weight: 600;
+  }
+  #replyBar button:disabled { opacity: .4; cursor: not-allowed; }
+  #convHint { text-align: center; color: #9ca3af; font-size: 12px; padding-bottom: 12px; }
+
+  /* ---------- 退款审核 ---------- */
+  #refundPanel { display: none; flex: 1; overflow-y: auto; padding: 24px; }
+  #refundPanel h3 { font-size: 18px; margin-bottom: 4px; }
+  #refundPanel .panel-sub { color: #9ca3af; font-size: 13px; margin-bottom: 16px; }
+  .refund-card {
+    background: #fff; border: 1px solid #eef0ef; border-radius: 16px;
+    padding: 14px 18px; margin-bottom: 12px; display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+  }
+  .refund-card .r-main { flex: 1; font-size: 14px; min-width: 220px; }
+  .refund-card .r-no { color: #9ca3af; font-size: 12px; margin-top: 2px; }
+  .refund-card .r-amount { font-size: 20px; font-weight: 800; color: #dc2626; white-space: nowrap; }
+  .refund-card .r-actions { display: flex; gap: 8px; align-items: center; }
+  .refund-card .r-actions input {
+    width: 170px; height: 38px; padding: 0 14px; border: 1px solid #e5e7eb; border-radius: 999px; font-size: 13px;
+  }
+  .r-tip { font-size: 12px; color: #b45309; width: 100%; }
+  .empty-block { color: #9ca3af; text-align: center; padding: 40px 0; font-size: 14px; }
+
+  .toast {
+    position: fixed; bottom: 28px; left: 50%; transform: translateX(-50%) translateY(20px);
+    background: #415444; color: #fff; padding: 12px 24px; border-radius: 999px;
+    font-size: 14px; opacity: 0; pointer-events: none; transition: all .3s; z-index: 200;
+  }
+  .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+</style>
+</head>
+<body>
+
+<header id="topHeader" style="display:none">
+  <div class="logo">🎧 客服工作台<span class="dot">.</span></div>
+  <div class="right">
+    <span class="whoami" id="whoami"></span>
+    <span class="role-tag" id="roleTag"></span>
+    <a class="back" href="/static/index.html">返回商店</a>
+    <button class="logout" onclick="logout()">退出登录</button>
+  </div>
+</header>
+
+<!-- 登录 -->
+<div id="loginBox">
+  <h1>🎧 客服工作台</h1>
+  <div class="sub">客服：demo_cs ｜ 主管：demo_leader ｜ 管理员：demo_admin（密码均 demo123）</div>
+  <input id="username" placeholder="用户名" autocomplete="off">
+  <input id="password" type="password" placeholder="密码" onkeydown="if(event.key==='Enter')login()">
+  <button onclick="login()">登 录</button>
+  <div class="err" id="loginErr"></div>
+  <a href="/static/index.html">返回商店</a>
+</div>
+
+<!-- 工作台 -->
+<div id="workBox">
+  <aside id="queuePanel">
+    <div class="tabs">
+      <button id="tabHuman" class="active" onclick="switchTab('human')">待人工</button>
+      <button id="tabRefunds" onclick="switchTab('refunds')">退款审核</button>
+      <button id="tabAll" onclick="switchTab('all')">全部会话</button>
+    </div>
+    <div id="queueList"><div class="queue-item" style="cursor:default">加载中…</div></div>
+  </aside>
+
+  <!-- 会话处理面板 -->
+  <div id="mainPanel">
+    <div class="stats-strip" id="statsStrip"></div>
+    <div id="emptyState">从左侧选择一个会话开始处理</div>
+    <div id="convPanel">
+      <div id="convHead">
+        <div>会话 #<span id="convId"></span> · <span id="convUser"></span></div>
+        <div style="display:flex;align-items:center;gap:10px">
+          <button id="endHandoffBtn" class="btn-end" style="display:none" onclick="endHandoff()">结束人工（交还 AI）</button>
+          <span class="badge" id="convStatus"></span>
+        </div>
+      </div>
+      <div id="msgList"></div>
+      <div id="approvalCard">
+        <div class="card-title">⏳ 待人工审批</div>
+        <div id="approvalBody"></div>
+        <div class="approval-actions" id="approvalActions">
+          <input id="commentInput" placeholder="审批备注（可选）">
+          <button class="btn btn-green" id="approveBtn" onclick="decide(true)">通过</button>
+          <button class="btn btn-outline" id="rejectBtn" onclick="decide(false)">驳回</button>
+        </div>
+        <div id="approvalTip"></div>
+      </div>
+      <div id="replyBar">
+        <input id="replyInput" placeholder="以客服身份回复用户…" onkeydown="if(event.key==='Enter')reply()">
+        <button id="replyBtn" onclick="reply()">发送回复</button>
+      </div>
+      <div id="convHint">回复与审批结果会立即写入用户会话；处理完成后会话退出「待人工」队列</div>
+    </div>
+
+    <!-- 退款审核：通过=订单置已退款，驳回=恢复原状态，均写审计 -->
+    <div id="refundPanel">
+      <h3>退款审核</h3>
+      <div class="panel-sub">列出全部待审核退款单；通过后订单置为已退款，驳回后恢复申请前状态，均写退款审计</div>
+      <div id="refundList"></div>
+    </div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+const API = '';
+const ROLE_CN = { customer_service: '客服', leader: '主管', admin: '管理员', user: '普通用户' };
+const ACTION_CN = { refund: '退款审核', urge: '催单加急', agent_note: '会话备注', ticket: '售后工单',
+                    delay_coupon: '延迟补偿券', change_address: '修改地址', cancel_order: '取消订单' };
+let token = localStorage.getItem('token') || '';
+let role = '';               // 只信 /auth/me 的实时返回，不信任本地缓存
+let myName = '';
+let sessionId = null;
+let currentTab = 'human';
+let busy = false;
+let openSeq = 0;             // 会话切换竞态防护：只渲染最后一次点击的结果
+let myId = null;             // 当前登录者 id，从 /auth/me 实时获取
+let replyAllowed = false;    // 当前会话是否允许回复：人工状态且本人可处理
+let claimedBy = null;        // 会话被他人认领时的接待人，null=未认领或本人
+let handled = false;         // 人工服务已结束、会话只读，防二次点击
+
+const loginBox = document.getElementById('loginBox');
+const workBox = document.getElementById('workBox');
+const headerEl = document.getElementById('topHeader');
+const queueListEl = document.getElementById('queueList');
+const msgListEl = document.getElementById('msgList');
+
+function toast(msg) {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.classList.add('show');
+  setTimeout(() => t.classList.remove('show'), 2600);
+}
+function authHeaders() { return { 'Authorization': 'Bearer ' + token }; }
+function isPrivileged() { return ['customer_service', 'leader', 'admin'].includes(role); }
+function canReviewRefund() { return role === 'leader' || role === 'admin'; }
+
+function logout() {
+  localStorage.removeItem('token');
+  localStorage.removeItem('role');
+  token = ''; role = ''; sessionId = null;
+  location.reload();
+}
+
+async function fetchMe() {
+  const res = await fetch(API + '/auth/me', { headers: authHeaders() });
+  if (!res.ok) return null;
+  const me = await res.json();
+  role = me.role;
+  myName = me.username;
+  myId = me.id;
+  localStorage.setItem('role', role);
+  return me;
+}
+
+async function enterWorkbench() {
+  // 身份实时校验：本地缓存的 role 可能过期或错位，一律以 /auth/me 为准
+  const me = await fetchMe();
+  if (!me || !isPrivileged()) {
+    localStorage.removeItem('token');
+    token = '';
+    document.getElementById('loginErr').textContent =
+      me ? '当前账号（' + (ROLE_CN[me.role] || me.role) + '）无工作台权限，请用客服/主管/管理员账号登录'
+         : '登录已过期，请重新登录';
+    return;
+  }
+  loginBox.style.display = 'none';
+  workBox.style.display = 'flex';
+  headerEl.style.display = 'flex';
+  document.getElementById('roleTag').textContent = (ROLE_CN[role] || role);
+  document.getElementById('whoami').textContent = myName;
+  switchTab('human');
+  loadStats();
+  // 待人工队列每 10s 自动刷新，缩短已处理会话的残留窗口；统计卡片同步刷新
+  setInterval(() => { if (!busy) { loadQueue(); loadStats(); } }, 10000);
+}
+
+/* ---------- 统计卡片 ---------- */
+const STAT_DEFS = [
+  ['auto_refunds', '今日自动退款', ''],
+  ['human_reviews', '今日人工审核', ''],
+  ['pending_refunds', '待审退款', 'warn'],
+  ['handoff_sessions', '待人工会话', 'warn'],
+  ['new_sessions_today', '今日新会话', ''],
+];
+async function loadStats() {
+  try {
+    const res = await fetch(API + '/stats/workbench', { headers: authHeaders() });
+    if (!res.ok) return;
+    const s = await res.json();
+    const strip = document.getElementById('statsStrip');
+    strip.innerHTML = '';
+    for (const [key, label, cls] of STAT_DEFS) {
+      const card = document.createElement('div');
+      card.className = 'stat-card';
+      card.innerHTML = '<div class="stat-num ' + cls + '">' + (s[key] ?? '-') + '</div><div class="stat-label">' + label + '</div>';
+      strip.appendChild(card);
+    }
+  } catch (e) { /* 静默 */ }
+}
+
+async function login() {
+  const fd = new FormData();
+  fd.append('username', document.getElementById('username').value);
+  fd.append('password', document.getElementById('password').value);
+  try {
+    const res = await fetch(API + '/auth/login', { method: 'POST', body: fd });
+    const data = await res.json();
+    if (res.ok && data.access_token) {
+      token = data.access_token;
+      localStorage.setItem('token', token);
+      await enterWorkbench();
+    } else {
+      document.getElementById('loginErr').textContent = data.detail || '登录失败';
+    }
+  } catch (e) {
+    document.getElementById('loginErr').textContent = '连接后端失败：' + e.message;
+  }
+}
+
+/* ---------- Tab 切换 ---------- */
+function switchTab(tab) {
+  currentTab = tab;
+  document.getElementById('tabHuman').classList.toggle('active', tab === 'human');
+  document.getElementById('tabRefunds').classList.toggle('active', tab === 'refunds');
+  document.getElementById('tabAll').classList.toggle('active', tab === 'all');
+  document.getElementById('convPanel').style.display = 'none';
+  document.getElementById('emptyState').style.display = tab === 'refunds' ? 'none' : '';
+  document.getElementById('refundPanel').style.display = tab === 'refunds' ? 'block' : 'none';
+  if (tab === 'refunds') { loadRefunds(); return; }
+  loadQueue();
+}
+
+/* ---------- 会话队列 ---------- */
+async function loadQueue() {
+  try {
+    const url = API + '/chat/sessions?limit=100' + (currentTab === 'human' ? '&needs_human=true' : '');
+    const res = await fetch(url, { headers: authHeaders() });
+    if (res.status === 401) { logout(); return; }
+    if (!res.ok) return;
+    const sessions = await res.json();
+    if (!sessions.length) {
+      queueListEl.innerHTML = '<div class="queue-item" style="cursor:default">' +
+        (currentTab === 'human' ? '✅ 暂无待人工会话' : '暂无会话') + '</div>';
+      return;
+    }
+    queueListEl.innerHTML = '';
+    for (const s of sessions) {
+      const item = document.createElement('div');
+      item.className = 'queue-item' + (s.id === sessionId ? ' active' : '');
+      const title = document.createElement('div');
+      title.className = 'q-title';
+      const raw = s.title || s.last_message || '（暂无消息）';
+      title.textContent = (raw.length > 12 ? raw.slice(0, 12) + '…' : raw);
+      if (s.needs_human) {
+        const flag = document.createElement('span');
+        if (s.human_handler_id) {
+          // 已被本人认领：待人工队列里只会出现"未认领"和"本人认领"两种
+          flag.className = 'q-flag q-flag-busy';
+          flag.textContent = '处理中' + (s.human_handler_id === myId ? '（我）' : '');
+        } else {
+          flag.className = 'q-flag';
+          flag.textContent = '待人工';
+        }
+        title.appendChild(flag);
+      } else if (currentTab === 'all') {
+        // 全部会话视图给非待人工会话加状态徽标，免得把已处理会话当成待办
+        const flag = document.createElement('span');
+        flag.className = 'q-flag q-flag-done';
+        flag.textContent = '已处理';
+        title.appendChild(flag);
+      }
+      const sub = document.createElement('div');
+      sub.className = 'q-sub';
+      // 归属标注：明确每个会话属于哪个用户，特权角色不再"混看"
+      const owner = s.is_owner ? '我' : (s.username || ('用户#' + s.user_id));
+      sub.textContent = owner + ' · ' + (s.message_count || 0) + ' 条 · ' +
+        new Date(s.updated_at).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
+      item.appendChild(title);
+      item.appendChild(sub);
+      item.onclick = () => openSession(s.id);
+      queueListEl.appendChild(item);
+    }
+  } catch (e) { /* 静默，下轮刷新再试 */ }
+}
+
+/* ---------- 会话处理 ---------- */
+function appendMsg(sender, text) {
+  const wrap = document.createElement('div');
+  wrap.className = 'msg ' + sender;
+  const bubble = document.createElement('div');
+  bubble.className = 'bubble';
+  bubble.textContent = text;
+  wrap.appendChild(bubble);
+  msgListEl.appendChild(wrap);
+  msgListEl.scrollTop = msgListEl.scrollHeight;
+}
+
+async function openSession(id) {
+  const seq = ++openSeq;          // 竞态防护：只渲染最后一次点击的会话
+  sessionId = id;
+  document.querySelectorAll('.queue-item').forEach(el => el.classList.remove('active'));
+  document.getElementById('emptyState').style.display = 'none';
+  document.getElementById('refundPanel').style.display = 'none';
+  document.getElementById('convPanel').style.display = 'flex';
+  msgListEl.innerHTML = '';
+  document.getElementById('approvalCard').style.display = 'none';
+  document.getElementById('replyInput').value = '';
+  document.getElementById('commentInput').value = '';
+  document.getElementById('endHandoffBtn').style.display = 'none';
+  handled = false;      // 新打开的会话重置面板态，可回复性由 meta 决定
+  claimedBy = null;
+  let meta = null;
+  try {
+    const [msgRes, sessRes] = await Promise.all([
+      fetch(API + '/chat/sessions/' + id + '/messages', { headers: authHeaders() }),
+      fetch(API + '/chat/sessions?limit=200', { headers: authHeaders() }),
+    ]);
+    if (seq !== openSeq) return;  // 期间用户点了别的会话，丢弃本次渲染
+    if (!msgRes.ok) { toast('加载会话失败：' + msgRes.status); return; }
+    const msgs = await msgRes.json();
+    for (const m of msgs) appendMsg(m.role === 'user' ? 'user' : 'assistant', m.content);
+    if (sessRes.ok) {
+      meta = (await sessRes.json()).find(s => s.id === id) || null;
+    }
+    if (meta) {
+      document.getElementById('convId').textContent = id;
+      document.getElementById('convUser').textContent = meta.is_owner ? '我' : (meta.username || ('用户#' + meta.user_id));
+      const st = document.getElementById('convStatus');
+      if (!meta.needs_human) {
+        st.textContent = '已结束'; st.className = 'badge ok';
+      } else if (meta.human_handler_id) {
+        st.textContent = '处理中'; st.className = 'badge busy';
+      } else {
+        st.textContent = '待人工'; st.className = 'badge human';
+      }
+      // 待人工会话可回复；已认领会话仅认领人/主管/管理员可继续处理；已结束的只读。
+      const canAct = !meta.human_handler_id || meta.human_handler_id === myId
+                     || role === 'leader' || role === 'admin';
+      replyAllowed = !!meta.needs_human && canAct;
+      if (meta.needs_human && meta.human_handler_id && meta.human_handler_id !== myId) {
+        claimedBy = meta.handler_username || ('客服#' + meta.human_handler_id);
+      }
+    } else {
+      replyAllowed = true;  // meta 拉取失败时保守放行，后端校验仍会兜底
+    }
+    applyReplyState();
+    const endBtn = document.getElementById('endHandoffBtn');
+    const hintEl = document.getElementById('convHint');
+    if (!meta) {
+      endBtn.style.display = 'none';
+    } else if (meta.needs_human) {
+      endBtn.style.display = '';
+      hintEl.textContent = claimedBy
+        ? ('该会话由 ' + claimedBy + ' 接待中，仅供查看（主管/管理员可代为处理）。')
+        : '回复会即时送达用户；处理完成后请点「结束人工」把会话交还 AI。';
+    } else {
+      endBtn.style.display = 'none';
+      hintEl.textContent = '该会话人工服务已结束（已交还 AI），仅供查看。';
+    }
+    await loadQueue();
+  } catch (e) { toast('加载会话失败：' + e.message); }
+  if (seq === openSeq) await loadApproval();
+}
+
+async function loadApproval() {
+  const card = document.getElementById('approvalCard');
+  const actions = document.getElementById('approvalActions');
+  const tip = document.getElementById('approvalTip');
+  try {
+    const res = await fetch(API + '/chat/sessions/' + sessionId + '/pending-approval', { headers: authHeaders() });
+    if (!res.ok) return;
+    const p = await res.json();
+    if (!p || !p.type) { card.style.display = 'none'; return; }
+
+    const body = document.getElementById('approvalBody');
+    body.innerHTML = '';
+    const line1 = document.createElement('div');
+    const actionName = ACTION_CN[p.action] || p.action || '动作';
+    const kv = (k, v) => '<span class="kv"><b>' + k + '：</b>' + v + '</span>';
+    line1.innerHTML = kv('类型', actionName);
+    if (p.order_no) line1.innerHTML += kv('订单号', p.order_no);
+    if (p.amount !== undefined && p.amount !== null) line1.innerHTML += kv('金额', '¥' + Number(p.amount).toFixed(2));
+    if (p.refund_id) line1.innerHTML += kv('退款单', '#' + p.refund_id);
+    if (p.target_type) line1.innerHTML += kv('对象', p.target_type + ' #' + (p.target_id ?? '-'));
+    body.appendChild(line1);
+    if (p.rules_hit && p.rules_hit.length) {
+      const r = document.createElement('div');
+      r.className = 'rules';
+      r.innerHTML = '<b>命中规则：</b>' + p.rules_hit.join('、') +
+        (p.rules_missed && p.rules_missed.length ? '　<b>未过：</b>' + p.rules_missed.join('、') : '');
+      body.appendChild(r);
+    }
+    if (p.suggested) {
+      const s = document.createElement('div');
+      s.className = 'suggested';
+      s.textContent = '建议：' + p.suggested;
+      body.appendChild(s);
+    }
+
+    // 权限：退款审批仅 leader/admin；其他动作客服也可处理
+    const isRefund = String(p.approval_ref || '').startsWith('refund:');
+    const allowed = !isRefund || canReviewRefund();
+    actions.style.display = allowed ? 'flex' : 'none';
+    tip.style.display = allowed ? 'none' : 'block';
+    tip.textContent = isRefund ? '退款审批仅主管/管理员可操作（客服可回复用户，但不能批钱）' : '';
+    card.style.display = 'block';
+  } catch (e) { card.style.display = 'none'; }
+}
+
+/* ---------- 会话回复 / 审批 ---------- */
+function setBusy(v) {
+  busy = v;
+  applyReplyState();
+}
+
+// 回复区可用性 = 非忙 且 会话在人工状态可处理
+function applyReplyState() {
+  const dis = busy || handled || !replyAllowed;
+  document.getElementById('replyBtn').disabled = dis;
+  document.getElementById('approveBtn').disabled = dis;
+  document.getElementById('rejectBtn').disabled = dis;
+  document.getElementById('replyInput').disabled = dis;
+}
+
+// 人工接管是持续状态：回复或审批成功后进入"处理中"，会话保持人工态、
+// 可继续回复，直到点「结束人工」显式交还 AI。
+function markProcessing() {
+  const st = document.getElementById('convStatus');
+  if (st) { st.textContent = '处理中'; st.className = 'badge busy'; }
+  document.getElementById('endHandoffBtn').style.display = '';
+  document.getElementById('convHint').textContent =
+    '该会话由您接待中，回复会即时送达用户；处理完成后请点「结束人工」把会话交还 AI。';
+}
+
+// 人工服务结束：本人点了结束，或会话已不在人工状态，面板转只读
+function markEnded(doneText) {
+  handled = true;
+  replyAllowed = false;
+  applyReplyState();
+  const st = document.getElementById('convStatus');
+  if (st) { st.textContent = '已结束'; st.className = 'badge ok'; }
+  document.getElementById('endHandoffBtn').style.display = 'none';
+  document.getElementById('convHint').textContent =
+    doneText || '人工服务已结束，会话已交还 AI；如需查看可从「全部会话」打开（只读）。';
+}
+
+// 结束人工交还 AI：唯一出口，关闭暂停的图 + 复位状态 + 用户侧收到结束提示
+async function endHandoff() {
+  if (busy || !sessionId) return;
+  setBusy(true);
+  try {
+    const res = await fetch(API + '/chat/sessions/' + sessionId + '/end-handoff', {
+      method: 'POST',
+      headers: authHeaders(),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.detail || ('HTTP ' + res.status));
+    toast('已结束人工服务，会话已交还 AI');
+    markEnded('人工服务已结束，图已复位、会话已交还 AI（用户侧已收到结束提示）。');
+    await loadQueue();
+  } catch (e) {
+    toast('结束失败：' + e.message);
+  }
+  setBusy(false);
+}
+
+async function postResume(body) {
+  const res = await fetch(API + '/chat/sessions/' + sessionId + '/resume', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    body: JSON.stringify(body),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) {
+    const err = new Error(data.detail || ('HTTP ' + res.status));
+    err.status = res.status;
+    throw err;
+  }
+  return data;
+}
+
+async function reply() {
+  const text = document.getElementById('replyInput').value.trim();
+  if (!text || busy || handled || !sessionId) return;
+  setBusy(true);
+  try {
+    const data = await postResume({ reply: text });
+    document.getElementById('replyInput').value = '';
+    appendMsg('assistant', data.answer || text);
+    toast('已回复用户');
+    // 回复后会话保持人工态、图不恢复，本人可继续回复，直到点「结束人工」交还 AI。
+    markProcessing();
+    await loadQueue();
+  } catch (e) {
+    if (e.status === 409) {
+      // 已被他人认领 / 已不在人工状态：刷新面板与队列，不留必然报错的发送键
+      toast(e.message || '该会话已不可回复，列表已刷新');
+      await openSession(sessionId);
+    } else {
+      toast('回复失败：' + e.message);
+    }
+  }
+  setBusy(false);
+}
+
+async function decide(approve) {
+  if (busy || handled || !sessionId) return;
+  const comment = document.getElementById('commentInput').value.trim();
+  setBusy(true);
+  try {
+    const data = await postResume({ decision: approve ? 'approve' : 'reject', comment: comment || undefined });
+    appendMsg('assistant', data.answer || '');
+    document.getElementById('approvalCard').style.display = 'none';
+    toast(approve ? '已通过并执行' : '已驳回');
+    // 审批完成但会话仍在人工态，可继续回复或结束人工
+    markProcessing();
+    await loadQueue();
+  } catch (e) {
+    if (e.status === 409) {
+      toast(e.message || '该会话已不可处理，列表已刷新');
+      await openSession(sessionId);
+    } else {
+      toast('审批失败：' + e.message);
+    }
+  }
+  setBusy(false);
+}
+
+/* ---------- 退款审核：PUT /refunds/{id}/review ---------- */
+async function loadRefunds() {
+  const listEl = document.getElementById('refundList');
+  try {
+    const res = await fetch(API + '/refunds/pending', { headers: authHeaders() });
+    if (res.status === 401) { logout(); return; }
+    if (!res.ok) { listEl.innerHTML = '<div class="empty-block">加载失败：' + res.status + '</div>'; return; }
+    const rows = await res.json();
+    if (!rows.length) { listEl.innerHTML = '<div class="empty-block">✅ 暂无待审核退款单</div>'; return; }
+    listEl.innerHTML = '';
+    for (const r of rows) {
+      const card = document.createElement('div');
+      card.className = 'refund-card';
+      const main = document.createElement('div');
+      main.className = 'r-main';
+      const line = document.createElement('div');
+      line.textContent = '用户 ' + r.username + ' · 订单 ' + r.order_no + ' · 退款单 #' + r.id;
+      const no = document.createElement('div');
+      no.className = 'r-no';
+      no.textContent = '原因：' + (r.reason || '（未填）') + ' · ' +
+        new Date(r.created_at).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
+      main.appendChild(line);
+      main.appendChild(no);
+
+      const amount = document.createElement('div');
+      amount.className = 'r-amount';
+      amount.textContent = '¥' + Number(r.amount).toFixed(2);
+
+      const actions = document.createElement('div');
+      actions.className = 'r-actions';
+      const comment = document.createElement('input');
+      comment.placeholder = '审批备注（可选）';
+      const okBtn = document.createElement('button');
+      okBtn.className = 'btn btn-green';
+      okBtn.textContent = '通过';
+      const noBtn = document.createElement('button');
+      noBtn.className = 'btn btn-outline';
+      noBtn.textContent = '驳回';
+      if (!canReviewRefund()) {
+        okBtn.disabled = true; noBtn.disabled = true;
+        okBtn.title = noBtn.title = '退款审批仅主管/管理员可操作';
+      }
+      okBtn.onclick = () => decideRefund(r.id, true, comment.value.trim(), okBtn);
+      noBtn.onclick = () => decideRefund(r.id, false, comment.value.trim(), noBtn);
+      actions.appendChild(comment);
+      actions.appendChild(okBtn);
+      actions.appendChild(noBtn);
+
+      card.appendChild(main);
+      card.appendChild(amount);
+      card.appendChild(actions);
+      if (!canReviewRefund()) {
+        const tip = document.createElement('div');
+        tip.className = 'r-tip';
+        tip.textContent = '退款审批仅主管/管理员可操作，客服请核对信息后移交主管处理';
+        card.appendChild(tip);
+      }
+      listEl.appendChild(card);
+    }
+  } catch (e) { listEl.innerHTML = '<div class="empty-block">加载失败：' + e.message + '</div>'; }
+}
+
+async function decideRefund(refundId, approve, comment, btn) {
+  if (busy) return;
+  busy = true;
+  const old = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = '处理中…';
+  try {
+    const res = await fetch(API + '/refunds/' + refundId + '/review', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json', ...authHeaders() },
+      body: JSON.stringify({ action: approve ? 'approve' : 'reject', comment: comment || undefined }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.detail || ('HTTP ' + res.status));
+    toast(approve ? '已通过：订单置为已退款' : '已驳回：订单恢复原状态');
+    await loadRefunds();
+  } catch (e) {
+    toast('审核失败：' + e.message);
+    btn.disabled = false;
+    btn.textContent = old;
+  }
+  busy = false;
+}
+
+/* ---------- 初始化 ---------- */
+if (token) enterWorkbench();
+</script>
+</body>
+</html>

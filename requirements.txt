@@ -1,0 +1,27 @@
+﻿# 多Agent 智能客服系统 — 依赖清单
+# 安装：pip install -r requirements.txt
+
+fastapi
+uvicorn[standard]
+python-multipart
+sqlalchemy[asyncio]
+psycopg[binary]
+pgvector
+pydantic
+python-jose[cryptography]
+bcrypt
+langchain
+langgraph
+langchain-core
+langchain-openai
+langgraph-checkpoint-postgres
+openai
+sse-starlette
+dashscope
+python-dotenv
+httpx
+redis
+
+pytest
+alembic
+prometheus-client
