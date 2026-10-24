@@ -88,6 +88,37 @@ def _tool_ok(result) -> bool:
     return not text.startswith(("查询失败", "工具执行失败", "工具不存在"))
 
 
+def _collect_tool_trace(messages) -> list[dict]:
+    """按出现顺序导出本轮工具调用，供七维评测判定「过程管控」与「工具真实性」。
+
+    从 messages 提取而不是解析日志：日志会采样、会轮转、格式随人改，拿来做指标不稳。
+    失败判定用 `_tool_ok` 而不是 ToolMessage.status —— 工具内部 try/except 后仍正常返回
+    字符串时 status 是 success，content 却是「工具执行失败：…」，只看 status 会把
+    "工具失败 + 模型编了个成功"判成完全正常。
+    """
+    pending: dict[str, dict] = {}
+    trace: list[dict] = []
+    for m in messages:
+        for call in getattr(m, "tool_calls", None) or []:
+            pending[str(call.get("id") or "")] = {
+                "name": call.get("name"),
+                "args": call.get("args") or {},
+            }
+        if isinstance(m, ToolMessage):
+            call = pending.get(str(getattr(m, "tool_call_id", "") or ""), {})
+            content = str(m.content or "")
+            status = getattr(m, "status", "success")
+            trace.append({
+                "name": call.get("name") or getattr(m, "name", "") or "",
+                "args": call.get("args") or {},
+                "status": status,
+                "ok": _tool_ok(content) and status != "error",
+                "content_chars": len(content),
+                "content_preview": content[:200],
+            })
+    return trace
+
+
 _llm = None
 LLM_FALLBACK_MODEL = os.getenv("LLM_FALLBACK_MODEL", "").strip()
 LLM_FALLBACK_BASE_URL = os.getenv("LLM_FALLBACK_BASE_URL", LLM_BASE_URL)
@@ -673,7 +704,7 @@ def _round_messages_of(result_msgs: list) -> list:
 
 async def run_agent(user_message: str, history: list[dict] | None = None, user: dict | None = None,
                     thread_id: str | None = None, long_term_memory: str | None = None,
-                    needs_human_reason: str | None = None) -> str:
+                    needs_human_reason: str | None = None, return_meta: bool = False) -> str | dict:
     """跑一遍 create_agent 返回最终回答。user 身份来自可信 State，不是 LLM 参数。"""
     _FALLBACK_ACTIVE.set(False)
     base_msgs, config = await _thread_base_messages(history, thread_id)
@@ -711,7 +742,14 @@ async def run_agent(user_message: str, history: list[dict] | None = None, user: 
         elapsed_ms, ai_steps, tool_steps,
         _usage_text(_handler_usage_totals(usage_handler)), _preview(answer),
     )
-    return answer
+    if not return_meta:
+        return answer
+    # 评测需要过程数据：只回文本没法判断"该调的工具有没有调、工具失败有没有被话术掩盖"
+    return {
+        "answer": answer,
+        "usage": _handler_usage_totals(usage_handler) or {},
+        "tool_trace": _collect_tool_trace(result["messages"]),
+    }
 
 
 async def has_pending_interrupt(thread_id: str) -> bool:

@@ -211,6 +211,28 @@ USE_TODO_PLANNER=true
 .venv\Scripts\python -m pytest -q
 ```
 
+## 评测
+
+单元测试管不了"模型说退款已提交、数据库里没有退款单"这类问题，所以另有一套七维评测：
+过程管控 / 要点覆盖 / 忠实度 / **工具真实性（查库核对）** / 稳定性 / 成本 / 安全权限。
+
+七维里最值钱的是工具真实性：题目声明 `expect_effects`（例如"refunds 表应 +1"），
+评测跑前跑后查表对比，模型嘴上说做了但没落库会被判成 `phantom_claim`。
+
+```bash
+# 起 8001 实例（连 customer_service_eval，与主库隔离）
+docker exec -d -e DB_NAME=customer_service_eval customer-service-agent-app-1 \
+  uvicorn main:app --host 127.0.0.1 --port 8001 --log-level warning
+
+# 跑（代码需先 docker cp 进容器，容器未挂载源码）
+docker cp eval customer-service-agent-app-1:/app/eval
+docker exec -e DB_NAME=customer_service_eval -e BACKEND_BASE=http://127.0.0.1:8001 \
+  customer-service-agent-app-1 python eval/agent_eval.py
+```
+
+评测会真改数据，**复跑前先重置**：`eval/reset_eval_db.sql`。
+详见 [eval/README.md](eval/README.md)。
+
 ## 设计要点
 
 1. **归属校验双层防线**：路由层校验 owner/角色，工具层再用 `InjectedState` 注入当前用户，

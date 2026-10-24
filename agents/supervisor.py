@@ -5,6 +5,7 @@ from typing import Annotated, NotRequired, TypedDict
 
 from langchain.agents import create_agent
 from langchain.tools import tool
+from langchain_core.callbacks import UsageMetadataCallbackHandler
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langgraph.graph import END, StateGraph
 from langgraph.graph.message import add_messages
@@ -12,11 +13,14 @@ from langgraph.graph.message import add_messages
 from agents.graph import (
     CustomerServiceState,
     _FALLBACK_ACTIVE,
+    _collect_tool_trace,
+    _handler_usage_totals,
     _history_to_messages,
     _normalize_agent_model,
     _preview,
     _run_config,
     _thread_base_messages,
+    _tool_ok,
     get_llm,
     long_term_memory_hook,
 )
@@ -166,8 +170,13 @@ def _build_graph():
 
 
 async def run_supervisor(user_message: str, history: list[dict] | None = None, user: dict | None = None,
-                         thread_id: str | None = None, long_term_memory: str | None = None) -> str:
-    """跑一遍 Supervisor 图，返回最终回答。long_term_memory 由 hook 注入系统提示，不进 messages。"""
+                         thread_id: str | None = None, long_term_memory: str | None = None,
+                         return_meta: bool = False) -> str | dict:
+    """跑一遍 Supervisor 图，返回最终回答。long_term_memory 由 hook 注入系统提示，不进 messages。
+
+    return_meta=True 时返回 {answer, route, usage, tool_trace}，供评测使用；
+    默认仍返回 str，线上调用方（routers/chat.py）行为不变。
+    """
     base_msgs, config = await _thread_base_messages(history, thread_id)
     msgs = base_msgs + [HumanMessage(content=user_message)]
     _FALLBACK_ACTIVE.set(False)
@@ -177,7 +186,8 @@ async def run_supervisor(user_message: str, history: list[dict] | None = None, u
     if long_term_memory:
         input_state["long_term_memory"] = long_term_memory
     # 显式设置 recursion_limit 作图级安全网，取值同单 Agent 的 _run_config
-    result = await graph.ainvoke(input_state, config=_run_config(config))
+    usage_handler = UsageMetadataCallbackHandler()
+    result = await graph.ainvoke(input_state, config=_run_config(config, usage_handler))
     answer = "抱歉，我没有理解您的问题。"
     for msg in reversed(result["messages"]):
         if isinstance(msg, AIMessage) and not getattr(msg, "tool_calls", None):
@@ -189,7 +199,14 @@ async def run_supervisor(user_message: str, history: list[dict] | None = None, u
         result.get("route", "-"),
         _preview(answer),
     )
-    return answer
+    if not return_meta:
+        return answer
+    return {
+        "answer": answer,
+        "route": result.get("route"),
+        "usage": _handler_usage_totals(usage_handler) or {},
+        "tool_trace": _collect_tool_trace(result["messages"]),
+    }
 
 
 async def astream_supervisor(user_message: str, history: list[dict] | None = None, user: dict | None = None,
