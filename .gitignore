@@ -8,6 +8,7 @@ venv/
 # 环境变量（含真实密钥，绝不能提交）
 .env
 .env.bak*
+eval/cs_rsi/deploy/live_policy.env
 
 # 向量库数据（本地持久化，可重建）
 chroma_data/

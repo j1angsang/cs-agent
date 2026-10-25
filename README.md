@@ -241,6 +241,8 @@ docker exec -e DB_NAME=customer_service_eval -e BACKEND_BASE=http://127.0.0.1:80
 ```bash
 python eval/cs_rsi/build_cases.py
 python eval/cs_rsi/cs_rsi.py --model qwen3.5:4b-q4_K_M --rounds 3 --reset
+# 需要自动写部署 artifact（带备份 + smoke 回滚）时：
+python eval/cs_rsi/cs_rsi.py --model qwen3.5:4b-q4_K_M --rounds 3 --reset --auto-deploy
 ```
 
 详见 [eval/cs_rsi/README.md](eval/cs_rsi/README.md)。

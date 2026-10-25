@@ -15,6 +15,8 @@
 | `cs_rsi.py` | 诊断 Agent → 编辑 Agent → dev 回归 → test 门控 → 回滚/写入 |
 | `rsi_workspace/config.json` | 当前已提交的 6 个策略阈值 |
 | `rsi_workspace/history/` | 每轮诊断、候选 diff、dev/test 和决策 |
+| `deploy/live_policy.json` | 自动应用后的 staging 策略配置 |
+| `deploy/deployments.jsonl` | 每次自动应用的 smoke、backup 和状态 |
 | `results/report.md` | 最近一次结果 |
 | `results/cs_rsi_*.json` | 机器可读结果 |
 
@@ -25,6 +27,22 @@ cd cs-agent
 python eval/cs_rsi/build_cases.py
 python eval/cs_rsi/cs_rsi.py --model qwen3.5:4b-q4_K_M --rounds 3 --reset
 ```
+
+需要自动应用时：
+
+```bash
+python eval/cs_rsi/cs_rsi.py --model qwen3.5:4b-q4_K_M --rounds 3 --reset --auto-deploy
+```
+
+`--auto-deploy` 会做：
+
+1. 通过 dev/test 门控；
+2. 备份旧的 `deploy/live_policy.json`；
+3. 原子写入新的 `deploy/live_policy.json` 和 `deploy/live_policy.env`；
+4. 用全量 60 题做 smoke；
+5. smoke 不达标就恢复旧配置，并写入 `deploy/deployments.jsonl`。
+
+它**不会**自动重启 app/容器；真实生产还需要 reload/重启、健康检查和金丝雀。
 
 Windows 本地如果没有时区库，`requirements.txt` 已增加：
 
@@ -81,11 +99,13 @@ tzdata; platform_system == "Windows"
 | round 2 / 3 | 100% | — |
 | round 2 / 3 决策 | 拒绝：dev 没有再提升 | — |
 
+round 1 通过 test 门控后开启 `--auto-deploy`：写入 `deploy/live_policy.json/.env`，全量 smoke=100%，备份旧配置到 `deploy/backups/`。这是 staging artifact，不会自动重启 app。
+
 ## 它不是完整 RSI
 
 - 只编辑 6 个阈值，不改规则函数；
 - 没有递归改进“改进方法本身”；
-- 没有自动上线，自动审批仅演示；
+- `--auto-deploy` 只写 staging artifact，不自动重启生产服务；
 - test 只用于门控，不参与编辑；
 - 真实生产还需要人工审批、版本回滚、金丝雀发布和线上监控。
 

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import urllib.request
 from dataclasses import asdict, dataclass
@@ -33,6 +34,11 @@ RESULTS = BASE / "results"
 WORK = BASE / "rsi_workspace"
 HISTORY = WORK / "history"
 CONFIG = WORK / "config.json"
+DEPLOY = BASE / "deploy"
+LIVE_CONFIG = DEPLOY / "live_policy.json"
+LIVE_ENV = DEPLOY / "live_policy.env"
+DEPLOY_BACKUPS = DEPLOY / "backups"
+DEPLOYMENTS = DEPLOY / "deployments.jsonl"
 DEFAULT_MODEL = "qwen3.5:4b-q4_K_M"
 
 
@@ -278,11 +284,80 @@ def test_gate(before: dict, after: dict) -> tuple[bool, list[str]]:
     return not reasons, reasons
 
 
+def deploy_config(cfg: CSConfig, cases: list[dict], model: str,
+                  dev_quality: float, test_quality: float) -> dict:
+    """Guarded auto-deploy：写部署 artifact、备份旧配置、全量 smoke、失败回滚。
+
+    注意：这里自动生效的是 deploy/ 下的 staging 配置，不会自动重启线上容器。
+    """
+    DEPLOY.mkdir(parents=True, exist_ok=True)
+    DEPLOY_BACKUPS.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    previous = LIVE_CONFIG.read_text(encoding="utf-8") if LIVE_CONFIG.exists() else None
+    backup_path = None
+    if previous is not None:
+        backup_path = DEPLOY_BACKUPS / f"live_policy-{stamp}.json"
+        backup_path.write_text(previous, encoding="utf-8")
+
+    tmp = LIVE_CONFIG.with_suffix(".tmp")
+    tmp.write_text(json.dumps(asdict(cfg), ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(tmp, LIVE_CONFIG)
+    LIVE_ENV.write_text(
+        "\n".join([
+            f"REFUND_AUTO_AMOUNT_LIMIT={cfg.refund_amount_limit}",
+            f"REFUND_DAILY_MAX_COUNT={cfg.refund_daily_max_count}",
+            f"REFUND_DAILY_MAX_TOTAL={cfg.refund_daily_max_total}",
+            f"COUPON_AMOUNT_LIMIT={cfg.coupon_amount_limit}",
+            f"COUPON_DELAY_DAYS={cfg.coupon_delay_days}",
+            f"COUPON_EXPIRE_DAYS={cfg.coupon_expire_days}",
+        ]) + "\n",
+        encoding="utf-8",
+    )
+
+    smoke = evaluate(cases, cfg)
+    # smoke 必须覆盖全量用例，且不低于 dev/test 中较低的那个分数
+    smoke_ok = smoke["quality"] + 0.001 >= min(dev_quality, test_quality)
+    record = {
+        "deployed_at": datetime.now(timezone.utc).isoformat(),
+        "model": model,
+        "config": asdict(cfg),
+        "dev_quality": dev_quality,
+        "test_quality": test_quality,
+        "smoke_quality": smoke["quality"],
+        "smoke_by_category": smoke["by_category"],
+        "status": "deployed",
+        "backup": str(backup_path.relative_to(BASE)) if backup_path else None,
+    }
+    if not smoke_ok:
+        if previous is None:
+            LIVE_CONFIG.unlink(missing_ok=True)
+            LIVE_ENV.unlink(missing_ok=True)
+        else:
+            LIVE_CONFIG.write_text(previous, encoding="utf-8")
+        record["status"] = "rolled_back"
+        record["reason"] = "全量 smoke 未达到 dev/test 下限"
+        DEPLOYMENTS.write_text(
+            (DEPLOYMENTS.read_text(encoding="utf-8") if DEPLOYMENTS.exists() else "")
+            + json.dumps(record, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+        return record
+
+    DEPLOYMENTS.write_text(
+        (DEPLOYMENTS.read_text(encoding="utf-8") if DEPLOYMENTS.exists() else "")
+        + json.dumps(record, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    return record
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", default=DEFAULT_MODEL)
     parser.add_argument("--rounds", type=int, default=3)
     parser.add_argument("--reset", action="store_true")
+    parser.add_argument("--auto-deploy", action="store_true",
+                        help="通过门控后自动写 deploy/live_policy.*，带备份和 smoke 回滚")
     args = parser.parse_args()
 
     RESULTS.mkdir(parents=True, exist_ok=True)
@@ -348,8 +423,18 @@ def main() -> None:
             print(f"candidate test={test_after['quality']} rejected: {test_reasons}")
             continue
         item["decision"] = "accepted"
-        item["approval"] = "auto_demo"
+        item["approval"] = "auto_deploy" if args.auto_deploy else "auto_demo"
         item["reasons"] = ["dev 提升且 test 门控通过"]
+        if args.auto_deploy:
+            deployment = deploy_config(candidate, cases, args.model,
+                                       dev_after["quality"], test_after["quality"])
+            item["deployment"] = deployment
+            if deployment["status"] != "deployed":
+                item["decision"] = "rejected_after_smoke"
+                item["reasons"].append(deployment.get("reason", "smoke failed"))
+                history.append(item)
+                print(f"deployment rolled back: {deployment.get('reason')}")
+                continue
         history.append(item)
         current = candidate
         dev_eval = dev_after
@@ -381,6 +466,7 @@ def main() -> None:
         f"- 用例：{len(cases)}（dev {len(dev)} / test {len(test)}）",
         f"- 最终配置：`{json.dumps(asdict(current), ensure_ascii=False)}`",
         f"- 最终 dev/test：{dev_eval['quality']}/{test_eval['quality']}",
+        f"- 自动部署：{'开启（写 deploy/live_policy.*）' if args.auto_deploy else '关闭'}",
         "",
         "## 每轮结果",
         "| 轮次 | 候选改动 | dev | test | 决策 | 原因 |",
@@ -397,12 +483,21 @@ def main() -> None:
     ]
     for item in history:
         lines.append(f"- round {item['round']}: {item.get('diagnosis', {}).get('summary', '')}")
+    deployments = [item["deployment"] for item in history if "deployment" in item]
+    if deployments:
+        lines += ["", "## 自动部署记录"]
+        for dep in deployments:
+            lines.append(
+                f"- {dep['status']}：smoke={dep['smoke_quality']}，"
+                f"backup={dep.get('backup') or '无（首次部署）'}"
+            )
     lines += [
         "",
         "## 边界",
-        "- 不是完整 RSI：只校准 6 个策略阈值，不改规则函数，没有自动上线；",
+        "- 不是完整 RSI：只校准 6 个策略阈值，不改规则函数；",
+        "- `--auto-deploy` 写的是 `deploy/live_policy.*` staging artifact，不会自动重启 app/容器；",
         "- test 只做门控，不参与编辑；",
-        "- 自动审批只用于演示，真实流程需要人工审批和回滚。",
+        "- 真实生产还需要进程 reload、健康检查和金丝雀。",
     ]
     (RESULTS / "report.md").write_text("\n".join(lines), encoding="utf-8")
     print(f"saved {RESULTS / 'report.md'}")
