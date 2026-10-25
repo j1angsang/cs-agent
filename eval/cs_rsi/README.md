@@ -6,8 +6,9 @@
 
 ## 能做什么
 
-- 60 条确定性策略用例，dev/test 各 30 条
-- 诊断失败 → 编辑策略阈值 → dev 回归 → test 门控 → 回滚/写入
+- 61 条确定性策略用例，dev 31 / test 30
+- 内层：诊断失败 → 编辑策略阈值 → dev 回归 → test 门控 → 回滚/写入
+- 外层：比较“只调退款 / 只调券 / 全调”等改进策略，用 3 折 meta-validation 选择
 - 可选自动应用：备份旧配置、全量 smoke、失败恢复
 - 可选本地 Ollama 编辑器；不接模型也能跑基线
 
@@ -37,7 +38,7 @@ python eval/cs_rsi/cs_rsi.py --model qwen3.5:4b-q4_K_M --rounds 3 --reset --auto
 
 - 备份旧配置
 - 写入 `deploy/live_policy.json` 和 `deploy/live_policy.env`
-- 用全量 60 题做 smoke
+- 用全量 61 题做 smoke
 - smoke 失败则恢复旧配置
 - 记录到 `deploy/deployments.jsonl`
 
@@ -47,18 +48,20 @@ python eval/cs_rsi/cs_rsi.py --model qwen3.5:4b-q4_K_M --rounds 3 --reset --auto
 
 | 阶段 | dev | test |
 |---|---:|---:|
-| baseline | 86.67% | 86.67% |
-| 自动校准后 | **100%** | **100%** |
+| baseline | 83.87% | 86.67% |
+| 内层自动校准后 | **100%** | **100%** |
+| 外层 meta-loop 选中 `full` | 100% | **100%** |
 
-本次模型为 `qwen3.5:4b-q4_K_M`，自动部署 smoke 为 100%。完整逐轮记录见 [results/report.md](results/report.md)。
+本次模型为 `qwen3.5:4b-q4_K_M`，自动部署 smoke 为 100%。完整逐轮记录见 [results/report.md](results/report.md) 和 [results/meta_report.md](results/meta_report.md)。
 
 ## 目录
 
 | 路径 | 内容 |
 |---|---|
-| `cases.jsonl` | 60 条策略用例 |
+| `cases.jsonl` | 61 条策略用例 |
 | `build_cases.py` | 用例生成脚本 |
 | `cs_rsi.py` | 评测与最小闭环入口 |
+| `meta_loop.py` | 外层改进策略选择 |
 | `rsi_workspace/` | 当前配置、历史轮次 |
 | `deploy/` | 自动应用配置、备份和部署记录 |
 | `results/` | 报告和机器可读结果 |
@@ -66,7 +69,7 @@ python eval/cs_rsi/cs_rsi.py --model qwen3.5:4b-q4_K_M --rounds 3 --reset --auto
 ## 边界
 
 - 只校准 6 个策略阈值，不改规则函数；
-- 不是完整 RSI，没有递归改进“改进方法本身”；
+- 外层只是有限策略选择，不是开放式自我改写；
 - test 只做门控，不参与编辑；
 - 自动应用只写 staging 配置，不负责重启生产服务。
 
@@ -74,4 +77,5 @@ python eval/cs_rsi/cs_rsi.py --model qwen3.5:4b-q4_K_M --rounds 3 --reset --auto
 
 - [DESIGN.md](DESIGN.md)：数据口径、配置字段、闭环实现和自动应用细节
 - [results/report.md](results/report.md)：最近一次逐轮结果
+- [results/meta_report.md](results/meta_report.md)：外层策略选择结果
 - [../README.md](../README.md)：Agent 七维评测

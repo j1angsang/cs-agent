@@ -1,0 +1,180 @@
+{
+  "model": "qwen3.5:4b-q4_K_M",
+  "config": {
+    "refund_amount_limit": 3000.0,
+    "refund_daily_max_count": 2,
+    "refund_daily_max_total": 6000.0,
+    "coupon_amount_limit": 600.0,
+    "coupon_delay_days": 2,
+    "coupon_expire_days": 30
+  },
+  "dev": 1.0,
+  "test": 1.0,
+  "dev_by_category": {
+    "address": 1.0,
+    "coupon": 1.0,
+    "note": 1.0,
+    "permission": 1.0,
+    "refund": 1.0,
+    "ticket": 1.0,
+    "urge": 1.0
+  },
+  "test_by_category": {
+    "address": 1.0,
+    "coupon": 1.0,
+    "note": 1.0,
+    "permission": 1.0,
+    "refund": 1.0,
+    "ticket": 1.0,
+    "urge": 1.0
+  },
+  "rounds": [
+    {
+      "round": 1,
+      "diagnosis": {
+        "summary": "多起退款因金额或累计额度超出阈值被人工介入，以及优惠券因发货延迟被拒绝",
+        "failures": [
+          {
+            "id": "rf-05",
+            "type": "threshold",
+            "reason": "待支付金额超过目标上限"
+          },
+          {
+            "id": "rf-07",
+            "type": "threshold",
+            "reason": "待支付金额处于目标边界"
+          },
+          {
+            "id": "rf-11",
+            "type": "quota",
+            "reason": "累计退款次数或额度不足"
+          },
+          {
+            "id": "rf-12",
+            "type": "quota",
+            "reason": "累计退款金额超限"
+          },
+          {
+            "id": "cp-03",
+            "type": "window",
+            "reason": "优惠券使用延迟超过允许窗口"
+          }
+        ]
+      },
+      "candidate": {
+        "refund_amount_limit": 3000,
+        "refund_daily_max_count": 2,
+        "refund_daily_max_total": 6000,
+        "coupon_amount_limit": 600,
+        "coupon_delay_days": 2,
+        "coupon_expire_days": 30,
+        "rationale": "提升退款与优惠券阈值以覆盖边界案例，缩短延迟窗口以减少误拒"
+      },
+      "candidate_config": {
+        "refund_amount_limit": 3000.0,
+        "refund_daily_max_count": 2,
+        "refund_daily_max_total": 6000.0,
+        "coupon_amount_limit": 600.0,
+        "coupon_delay_days": 2,
+        "coupon_expire_days": 30
+      },
+      "diff": {
+        "refund_amount_limit": {
+          "from": 2198.0,
+          "to": 3000.0
+        },
+        "refund_daily_max_count": {
+          "from": 1,
+          "to": 2
+        },
+        "refund_daily_max_total": {
+          "from": 4396.0,
+          "to": 6000.0
+        },
+        "coupon_amount_limit": {
+          "from": 439.6,
+          "to": 600.0
+        },
+        "coupon_delay_days": {
+          "from": 3,
+          "to": 2
+        }
+      },
+      "dev_before": 0.8387,
+      "dev_after": 1.0,
+      "decision": "accepted",
+      "reasons": [
+        "dev 提升且 test 门控通过"
+      ],
+      "test_after": 1.0,
+      "test_gate": {
+        "accepted": true,
+        "reasons": []
+      },
+      "approval": "auto_demo"
+    },
+    {
+      "round": 2,
+      "diagnosis": {
+        "summary": "未检测到任何失败案例",
+        "failures": []
+      },
+      "candidate": {
+        "refund_amount_limit": 3000,
+        "refund_daily_max_count": 2,
+        "refund_daily_max_total": 6000,
+        "coupon_amount_limit": 600,
+        "coupon_delay_days": 2,
+        "coupon_expire_days": 30,
+        "rationale": "当前配置未触发任何失败案例，保持现有策略不变。"
+      },
+      "candidate_config": {
+        "refund_amount_limit": 3000.0,
+        "refund_daily_max_count": 2,
+        "refund_daily_max_total": 6000.0,
+        "coupon_amount_limit": 600.0,
+        "coupon_delay_days": 2,
+        "coupon_expire_days": 30
+      },
+      "diff": {},
+      "dev_before": 1.0,
+      "dev_after": 1.0,
+      "decision": "rejected",
+      "reasons": [
+        "dev quality 未提升（1.0 -> 1.0）"
+      ]
+    },
+    {
+      "round": 3,
+      "diagnosis": {
+        "summary": "未检测到任何失败数据",
+        "failures": []
+      },
+      "candidate": {
+        "refund_amount_limit": 3000,
+        "refund_daily_max_count": 2,
+        "refund_daily_max_total": 6000,
+        "coupon_amount_limit": 600,
+        "coupon_delay_days": 2,
+        "coupon_expire_days": 30,
+        "rationale": "当前配置已满足所有约束且无失败数据，无需调整"
+      },
+      "candidate_config": {
+        "refund_amount_limit": 3000.0,
+        "refund_daily_max_count": 2,
+        "refund_daily_max_total": 6000.0,
+        "coupon_amount_limit": 600.0,
+        "coupon_delay_days": 2,
+        "coupon_expire_days": 30
+      },
+      "diff": {},
+      "dev_before": 1.0,
+      "dev_after": 1.0,
+      "decision": "rejected",
+      "reasons": [
+        "dev quality 未提升（1.0 -> 1.0）"
+      ]
+    }
+  ],
+  "scope": "deterministic customer-service policy calibration; not production RSI"
+}

@@ -222,9 +222,23 @@ def main() -> None:
             {"user_id": uid, "order": {"id": o.id, "user_id": o.user_id, "status": o.status, "total_price": float(o.total_price)}, "session_id": s.id, "session_owner_id": s.user_id},
             d.rules_missed)
 
-    # 重新按顺序分 split，保证 60 题 dev/test 各 30
+    # 保证退款“日累计额度”边界在 dev/test 都有样本
+    base_refund = next(row for row in rows if row["id"] == "rf-12")
+    rows.append({
+        "id": "rf-21",
+        "split": "test",
+        "category": "refund",
+        "action": "refund",
+        "description": "待支付 2500，已有 1 笔 3000 退款（test 同界样本）",
+        "expected_level": "auto",
+        "expected_missed": [],
+        "input": base_refund["input"],
+    })
+
+    # 重新按顺序分 split，并固定关键边界样本位置，保证 dev/test 都能校准同一条规则
+    split_overrides = {"rf-12": "dev", "rf-21": "test"}
     for i, row in enumerate(rows):
-        row["split"] = "dev" if i % 2 == 0 else "test"
+        row["split"] = split_overrides.get(row["id"], "dev" if i % 2 == 0 else "test")
 
     out = BASE / "cases.jsonl"
     out.write_text("\n".join(json.dumps(row, ensure_ascii=False) for row in rows) + "\n", encoding="utf-8")
