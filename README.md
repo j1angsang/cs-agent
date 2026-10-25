@@ -233,6 +233,18 @@ docker exec -e DB_NAME=customer_service_eval -e BACKEND_BASE=http://127.0.0.1:80
 评测会真改数据，**复跑前先重置**：`eval/reset_eval_db.sql`。
 详见 [eval/README.md](eval/README.md)。
 
+### 策略校准 RSI 最小闭环
+
+`eval/cs_rsi/` 另有一套离线确定性策略评测：60 条用例覆盖退款、优惠券、改地址、催单、工单、备注和权限；
+`cs_rsi.py` 演示“诊断 → 编辑阈值 → dev 回归 → test 门控 → 回滚/写入”的最小闭环。
+
+```bash
+python eval/cs_rsi/build_cases.py
+python eval/cs_rsi/cs_rsi.py --model qwen3.5:4b-q4_K_M --rounds 3 --reset
+```
+
+详见 [eval/cs_rsi/README.md](eval/cs_rsi/README.md)。
+
 ## 设计要点
 
 1. **归属校验双层防线**：路由层校验 owner/角色，工具层再用 `InjectedState` 注入当前用户，

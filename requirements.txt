@@ -25,3 +25,4 @@ redis
 pytest
 alembic
 prometheus-client
+tzdata; platform_system == "Windows"

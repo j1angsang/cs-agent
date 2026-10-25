@@ -1,0 +1,8 @@
+{
+  "refund_amount_limit": 3000.0,
+  "refund_daily_max_count": 2,
+  "refund_daily_max_total": 6000.0,
+  "coupon_amount_limit": 600.0,
+  "coupon_delay_days": 2,
+  "coupon_expire_days": 30
+}
