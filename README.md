@@ -213,41 +213,9 @@ USE_TODO_PLANNER=true
 
 ## 评测
 
-单元测试管不了"模型说退款已提交、数据库里没有退款单"这类问题，所以另有一套七维评测：
-过程管控 / 要点覆盖 / 忠实度 / **工具真实性（查库核对）** / 稳定性 / 成本 / 安全权限。
+单元测试覆盖基础逻辑；另有 Agent 七维评测和客服策略评测，用于检查工具真实性、权限和策略边界。详见 `eval/README.md` 和 `eval/cs_rsi/README.md`。
 
-七维里最值钱的是工具真实性：题目声明 `expect_effects`（例如"refunds 表应 +1"），
-评测跑前跑后查表对比，模型嘴上说做了但没落库会被判成 `phantom_claim`。
-
-```bash
-# 起 8001 实例（连 customer_service_eval，与主库隔离）
-docker exec -d -e DB_NAME=customer_service_eval customer-service-agent-app-1 \
-  uvicorn main:app --host 127.0.0.1 --port 8001 --log-level warning
-
-# 跑（代码需先 docker cp 进容器，容器未挂载源码）
-docker cp eval customer-service-agent-app-1:/app/eval
-docker exec -e DB_NAME=customer_service_eval -e BACKEND_BASE=http://127.0.0.1:8001 \
-  customer-service-agent-app-1 python eval/agent_eval.py
-```
-
-评测会真改数据，**复跑前先重置**：`eval/reset_eval_db.sql`。
-详见 [eval/README.md](eval/README.md)。
-
-### 策略校准 RSI 最小闭环
-
-`eval/cs_rsi/` 另有一套离线确定性策略评测：60 条用例覆盖退款、优惠券、改地址、催单、工单、备注和权限；
-`cs_rsi.py` 演示“诊断 → 编辑阈值 → dev 回归 → test 门控 → 回滚/写入”的最小闭环。
-
-```bash
-python eval/cs_rsi/build_cases.py
-python eval/cs_rsi/cs_rsi.py --model qwen3.5:4b-q4_K_M --rounds 3 --reset
-# 需要自动写部署 artifact（带备份 + smoke 回滚）时：
-python eval/cs_rsi/cs_rsi.py --model qwen3.5:4b-q4_K_M --rounds 3 --reset --auto-deploy
-```
-
-详见 [eval/cs_rsi/README.md](eval/cs_rsi/README.md)。
-
-## 设计要点
+## 设计要点## 设计要点
 
 1. **归属校验双层防线**：路由层校验 owner/角色，工具层再用 `InjectedState` 注入当前用户，
    普通用户无法借 Agent 越权。
