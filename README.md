@@ -1,4 +1,4 @@
-# 多 Agent 智能客服系统
+# Multi-Agent 智能客服系统
 
 FastAPI + LangGraph + pgvector 的智能客服系统：商城页下单，聊天页与 AI 客服对话；
 Agent 能查订单/商品/退款、用 RAG 回答售后政策，并在拿不准时转人工。
@@ -165,17 +165,18 @@ curl -s -X POST http://127.0.0.1:8000/chat \
 - **会话管理**：`POST /chat/sessions` 建空会话、`DELETE /chat/sessions/{id}` 仅所有者
   （越权统一 404 防探测），列表带 `title`/`message_count`/`is_owner`。
 
-### 多 Agent / Planner 开关
+### 编排形态
 
-默认关闭，保持单 Agent 基线稳定。演示时改 `.env` 后重启：
+默认主管路由式 Multi-Agent：主管节点按意图路由到订单、商品、政策三个领域助手，再执行工具。
+意图置信度低于阈值时转澄清而非直接执行，超出客服范围的问题直接拒答。
+
+需要回落单 Agent（单模型持有全部工具）时：
 
 ```dotenv
-USE_SUPERVISOR=true
-USE_TODO_PLANNER=true
+USE_SUPERVISOR=false
 ```
 
-- `USE_SUPERVISOR=true`：主管节点先路由到 order/product/knowledge 子 Agent，再执行工具。
-- `USE_TODO_PLANNER=true`：多步任务先 `write_todos` 外化计划再逐步执行。
+`USE_TODO_PLANNER=true` 时，多步任务先 `write_todos` 外化计划，再逐步执行。
 
 ### 可选能力
 

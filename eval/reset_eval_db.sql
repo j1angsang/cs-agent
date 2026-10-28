@@ -15,14 +15,17 @@ WHERE order_no IN ('WAORD009', 'WAORD010');
 UPDATE orders SET status = 'shipped'
 WHERE order_no = 'WAORD004';
 
--- 3. 清掉评测过程中产生的退款单（先清审计，再清主表）
+-- 3. 清掉评测订单上的退款单（先清审计，再清主表）
+-- 按订单号删而不是按时间删：历史跑测留下的退款单可能早于任何时间窗，
+-- 按时间删会漏掉，导致下一轮"订单已在退款审核中"，落库断言直接失真。
 DELETE FROM refund_audit_logs
 WHERE refund_id IN (
-    SELECT id FROM refunds
-    WHERE user_id IN (4, 5) AND created_at > now() - interval '6 hours'
+    SELECT r.id FROM refunds r
+    JOIN orders o ON o.id = r.order_id
+    WHERE o.order_no IN ('WAORD009', 'WAORD010')
 );
 DELETE FROM refunds
-WHERE user_id IN (4, 5) AND created_at > now() - interval '6 hours';
+WHERE order_id IN (SELECT id FROM orders WHERE order_no IN ('WAORD009', 'WAORD010'));
 
 -- 4. 转人工标记与备注归零（escalate_to_human 写这两列）
 UPDATE chat_sessions
@@ -34,4 +37,4 @@ COMMIT;
 -- 自检：这三行应该分别是 pending / pending / shipped，且没有残留退款单
 SELECT order_no, status FROM orders WHERE order_no IN ('WAORD009','WAORD010','WAORD004') ORDER BY order_no;
 SELECT count(*) AS leftover_refunds FROM refunds
-WHERE user_id IN (4, 5) AND created_at > now() - interval '6 hours';
+WHERE order_id IN (SELECT id FROM orders WHERE order_no IN ('WAORD009', 'WAORD010'));

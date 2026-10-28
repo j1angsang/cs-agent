@@ -115,6 +115,9 @@ def _collect_tool_trace(messages) -> list[dict]:
                 "ok": _tool_ok(content) and status != "error",
                 "content_chars": len(content),
                 "content_preview": content[:200],
+                # 评测判忠实度时，工具输出本身就是证据（订单状态、金额都从这里来）。
+                # 只给 200 字预览会让 judge 看不到后半段，把正确回答判成"无据"。
+                "content": content[:1500],
             })
     return trace
 

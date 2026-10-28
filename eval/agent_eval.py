@@ -44,6 +44,7 @@ from langchain_openai import ChatOpenAI  # noqa: E402
 from sqlalchemy import create_engine, text  # noqa: E402
 
 from agents.graph import run_agent  # noqa: E402
+from agents.supervisor import route_question  # noqa: E402
 from config.llm import LLM_API_KEY, LLM_BASE_URL, LLM_MODEL  # noqa: E402
 from rag.rag import retrieve_hits  # noqa: E402
 
@@ -209,6 +210,83 @@ def evidence_texts(question: str) -> list[str]:
     return [t for t in out if t]
 
 
+EVAL_MODE = (os.getenv("EVAL_MODE") or "single").strip().lower()
+
+
+async def invoke_agent(question: str, history: list[dict], payload: dict) -> dict:
+    """按 EVAL_MODE 选入口：single = 单 Agent，supervisor = 路由 + worker。
+
+    两个入口签名不同（supervisor 没有 needs_human_reason），在这里收口，
+    调用方只关心"给我 answer + tool_trace"。同一套题可以横评两种架构。
+    """
+    if EVAL_MODE == "supervisor":
+        from agents.supervisor import run_supervisor
+
+        return await run_supervisor(question, history, payload, thread_id=None, return_meta=True)
+    return await run_agent(question, history, payload, thread_id=None, return_meta=True)
+
+
+async def eval_intent(item: dict) -> dict | None:
+    """路由意图准确率，只测标了 expected_intent 的题。
+
+    单独调 route_question，不走完整 Agent：路由是 Supervisor 的职责，而主流程测的是
+    单 Agent，两条路径不是一回事。混在一起算，得到的"准确率"既不代表路由也不代表回答。
+    """
+    expected = item.get("expected_intent")
+    if not expected:
+        return None
+    try:
+        decision = await route_question(item["question"])
+    except Exception as exc:
+        return {"expected": expected, "predicted": None, "confidence": None,
+                "clarified": False, "ok": False, "error": str(exc)[:120]}
+    candidate = decision.get("candidate") or decision.get("route")
+    return {
+        "expected": expected,
+        "predicted": candidate,
+        "confidence": decision.get("confidence"),
+        "clarified": decision.get("route") is None,
+        "ok": candidate == expected,
+    }
+
+
+async def run_follow_ups(item: dict, first: dict, engine) -> dict | None:
+    """多轮追问：用第一轮的回答拼 history，看第二轮能不能正确继承指代。
+
+    客服场景一半以上是追问，而"第二轮丢订单号就问不动"是最常见的退化。
+    这里复用同一个 session_id，让工具看到和线上一致的会话上下文。
+    """
+    follow_ups = item.get("follow_ups") or []
+    if not follow_ups:
+        return None
+    keywords = item.get("follow_up_keywords") or []
+    history = [
+        {"role": "user", "content": item["question"]},
+        {"role": "assistant", "content": first.get("answer") or ""},
+    ]
+    payload = {"id": int(item["user_id"]), "role": item["role"],
+               "session_id": first.get("session_id")}
+    turns = []
+    for question in follow_ups:
+        try:
+            meta = await invoke_agent(question, history, payload)
+            answer = (meta.get("answer") or "") if isinstance(meta, dict) else str(meta)
+            tools = [t.get("name") for t in ((meta.get("tool_trace") or []) if isinstance(meta, dict) else [])]
+            error = None
+        except Exception as exc:
+            answer, tools, error = "", [], f"{type(exc).__name__}: {str(exc)[:120]}"
+        hit = [k for k in keywords if k in answer]
+        turns.append({
+            "question": question, "answer": answer, "tools": tools,
+            "keyword_hit": hit, "error": error,
+            # 有标注关键词就按关键词判，否则按"有没有真的调工具"判
+            "ok": (bool(hit) if keywords else bool(tools)),
+        })
+        history.append({"role": "user", "content": question})
+        history.append({"role": "assistant", "content": answer})
+    return {"turns": len(turns), "results": turns, "ok": all(t["ok"] for t in turns)}
+
+
 async def run_once(item: dict, judge_llm, engine) -> dict:
     effects = item.get("expect_effects") or []
     with engine.connect() as conn:
@@ -222,7 +300,7 @@ async def run_once(item: dict, judge_llm, engine) -> dict:
         # 测的是实际运行的那条路径：USE_SUPERVISOR 默认 false，线上走单 Agent。
         # Supervisor 的 worker 只绑了查询工具（没有 request_refund/cancel_order），
         # 拿它评测会把"工具压根没暴露"误记成"模型不会用工具"。
-        meta = await run_agent(item["question"], [], payload, thread_id=None, return_meta=True)
+        meta = await invoke_agent(item["question"], [], payload)
         error = None
     except Exception as exc:
         meta = {"answer": "", "tool_trace": [], "usage": {}}
@@ -237,6 +315,13 @@ async def run_once(item: dict, judge_llm, engine) -> dict:
     usage = (meta.get("usage") or {}) if isinstance(meta, dict) else {}
 
     effect_score = score_effects(item, before, after)
+    # 忠实度证据要含工具输出：订单状态、金额、退款单号全在工具返回里，
+    # 只拿 RAG 政策文本当证据，会把"如实复述工具结果"判成"无据编造"。
+    evidences = evidence_texts(item["question"]) + [
+        f"[工具 {t.get('name')} 返回]\n{t.get('content')}"
+        for t in trace
+        if t.get("content") and t.get("ok")
+    ]
     return {
         "id": item["id"],
         "category": item.get("category"),
@@ -251,10 +336,11 @@ async def run_once(item: dict, judge_llm, engine) -> dict:
         "tokens": int(usage.get("total_tokens") or 0),
         "process": score_process(item, trace),
         "coverage": score_coverage(item, answer),
-        "faithfulness": await judge(judge_llm, answer, evidence_texts(item["question"])),
+        "faithfulness": await judge(judge_llm, answer, evidences),
         "effects": effect_score,
         "tool_truth": score_tool_truth(item, answer, trace, effect_score),
         "security": score_security(item, answer, effect_score),
+        "intent": await eval_intent(item),
     }
 
 
@@ -288,13 +374,18 @@ def _pct(values: list[float], pct: int) -> float:
     return round(ordered[idx], 1)
 
 
-def summarize(rows: list[dict], stability: dict) -> dict:
+def summarize(rows: list[dict], stability: dict, multi_results: dict) -> dict:
     proc = [r["process"] for r in rows if r["process"]]
     cov = [r["coverage"] for r in rows if r["coverage"]]
     eff = [r["effects"] for r in rows if r["effects"]]
     verdicts = [r["faithfulness"].get("verdict") for r in rows]
     lat = [r["elapsed_ms"] for r in rows if not r["error"]]
     tok = [r["tokens"] for r in rows if r["tokens"]]
+    intents = [r["intent"] for r in rows if r.get("intent")]
+    confusion: dict[str, int] = {}
+    for info in intents:
+        key = f"{info['expected']}->{info['predicted']}"
+        confusion[key] = confusion.get(key, 0) + 1
     return {
         "questions": len(rows),
         "errors": sum(1 for r in rows if r["error"]),
@@ -308,6 +399,12 @@ def summarize(rows: list[dict], stability: dict) -> dict:
         "effect_cases": len(eff),
         "tool_truth": _rate([r["tool_truth"]["ok"] for r in rows]),
         "phantom_claims": [r["id"] for r in rows if r["tool_truth"].get("phantom_claim")],
+        "intent_accuracy": _rate([i["ok"] for i in intents]),
+        "intent_cases": len(intents),
+        "clarify_rate": _rate([i["clarified"] for i in intents]),
+        "intent_confusion": confusion,
+        "multiturn_pass": _rate([v["ok"] for v in multi_results.values()]),
+        "multiturn_cases": len(multi_results),
         "security_pass": _rate([r["security"]["ok"] for r in rows]),
         "security_leaks": [{"id": r["id"], "tokens": r["security"]["leaked"]} for r in rows if r["security"]["leaked"]],
         "refusal_rate": _rate([r["security"]["refused"] for r in rows if r["security"]["needs_refusal"]]),
@@ -331,6 +428,8 @@ def render(result: dict) -> str:
         "| 维度 | 指标 | 值 |",
         "|---|---|---|",
         f"| 1 过程管控 | 工具调用符合预期 | {s['process_pass'] if s['process_cases'] else 'n/a'}（{s['process_cases']} 题） |",
+        f"| 1 过程管控 | 路由意图准确率 | {s['intent_accuracy'] if s['intent_cases'] else 'n/a'}（{s['intent_cases']} 题，低置信转澄清 {s['clarify_rate']}） |",
+        f"| 1 过程管控 | 多轮追问继承 | {s['multiturn_pass'] if s['multiturn_cases'] else 'n/a'}（{s['multiturn_cases']} 题） |",
         f"| 2 要点覆盖 | 应说的都说到了 | {s['coverage_pass'] if s['coverage_cases'] else 'n/a'}（{s['coverage_cases']} 题） |",
         f"| 3 忠实度 | 无无据断言 | {s['faithful_rate']}（ungrounded {s['ungrounded']} 题） |",
         f"| 4 工具真实性 | **声明效果与落库一致** | {s['effect_match'] if s['effect_cases'] else 'n/a'}（{s['effect_cases']} 题） |",
@@ -357,6 +456,20 @@ def render(result: dict) -> str:
         )
     if s["phantom_claims"]:
         lines += ["", f"**空口宣称（说做了但没落库）**：{', '.join(s['phantom_claims'])}"]
+    if s.get("intent_confusion"):
+        lines += ["", "## 路由混淆（期望 -> 实际）", "", "| 期望 -> 实际 | 次数 |", "|---|---|"]
+        for key, count in sorted(s["intent_confusion"].items(), key=lambda kv: -kv[1]):
+            mark = "" if key.split("->")[0] == key.split("->")[1] else " ✗"
+            lines.append(f"| {key}{mark} | {count} |")
+    if result.get("multiturn_detail"):
+        lines += ["", "## 多轮追问", ""]
+        for qid, info in result["multiturn_detail"].items():
+            for turn in info["results"]:
+                status = "OK" if turn["ok"] else "FAIL"
+                lines.append(
+                    f"- {qid} · 「{turn['question']}」 → {status}"
+                    f"（工具 {','.join(turn['tools']) or '-'}）"
+                )
     if s["security_leaks"]:
         lines += ["", "**泄漏明细**："]
         lines += [f"- {x['id']}: {', '.join(x['tokens'])}" for x in s["security_leaks"]]
@@ -394,10 +507,14 @@ async def main() -> None:
     )
     engine = create_engine(db_url(), pool_pre_ping=True)
 
-    rows, stability = [], {}
+    rows, stability, multi_results = [], {}, {}
     for idx, item in enumerate(items, 1):
         row = await run_once(item, judge_llm, engine)
         rows.append(row)
+        if item.get("follow_ups"):
+            multi = await run_follow_ups(item, row, engine)
+            if multi:
+                multi_results[item["id"]] = multi
         if args.repeat > 1:
             measured = await measure_stability(item, judge_llm, engine, args.repeat)
             if measured:
@@ -425,8 +542,9 @@ async def main() -> None:
     result = {
         "meta": {"db": EVAL_DB, "backend": EVAL_BACKEND, "repeat": args.repeat,
                  "judge": "on" if judge_llm else "off"},
-        "summary": summarize(rows, stab_summary),
+        "summary": summarize(rows, stab_summary, multi_results),
         "stability_detail": stability,
+        "multiturn_detail": multi_results,
         "rows": rows,
     }
     args.report.parent.mkdir(parents=True, exist_ok=True)

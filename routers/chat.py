@@ -53,7 +53,7 @@ def _preview(value, limit: int = 120) -> str:
     return text if len(text) <= limit else text[: limit - 3] + "..."
 
 
-USE_SUPERVISOR = os.getenv("USE_SUPERVISOR", "false").strip().lower() == "true"
+USE_SUPERVISOR = os.getenv("USE_SUPERVISOR", "true").strip().lower() == "true"
 
 _stream_degrade_count = 0
 
